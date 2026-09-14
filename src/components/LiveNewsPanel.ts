@@ -251,7 +251,6 @@ const DIRECT_HLS_MAP: Readonly<Record<string, string>> = {
   'alarabiya': 'https://live.alarabiya.net/alarabiapublish/alarabiya.smil/playlist.m3u8',
   'aljazeera': 'https://live-hls-apps-aje-fa.getaj.net/AJE/index.m3u8',
   'bloomberg': 'https://bloomberg.com/media-manifest/streams/us.m3u8',
-  'cnn': 'https://turnerlive.warnermediacdn.com/hls/live/586495/cnngo/cnn_slate/VIDEO_0_3564000.m3u8',
   'abc-news': 'https://lnc-abc-news.tubi.video/index.m3u8',
   'nbc-news': 'https://dai2.xumo.com/amagi_hls_data_xumo1212A-xumo-nbcnewsnow/CDN/master.m3u8',
   'ndtv': 'https://ndtvindiaelemarchana.akamaized.net/hls/live/2003679/ndtvindia/master.m3u8',

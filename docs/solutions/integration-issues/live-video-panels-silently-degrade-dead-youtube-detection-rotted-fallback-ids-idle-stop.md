@@ -148,6 +148,7 @@ Fix (branch `fix/live-video-links`, 2026-09-14):
 
 - `npm run live-video:check -- <video URL, channel URL, video ID or https .m3u8> ...` plays each YouTube entry in headless Chromium as if embedded on `https://www.worldmonitor.app`. It classifies the player with `classifyAttempt` (`src/services/live-video/model.ts`): live when the player reports `isLive`, an ended recording when `isLive` is false with a duration, and failed on a player error such as 150. HLS entries are fetched and read as live or VOD. It exits 1 when any entry is not live.
 - Every webcam and Live News `fallbackVideoId` was re-checked with it. Dead or ended IDs were replaced with verified live streams, most of them found by the owner. Where no live stream exists, the ID was removed: the tel-aviv, beirut-mtv, nasa-live and space-x webcams are gone, and 25 optional Live News channels lost their dead fallback. The odessa webcam was folded into one Ukraine feed that rotates through several cities, and the unused `channelHandle` field was deleted.
+- The checker also read CNN's `DIRECT_HLS_MAP` stream (`cnn_slate`) as a recording: a playlist with `#EXT-X-ENDLIST`, about 10 minutes long, that played under a LIVE label on web. It was removed, so CNN plays its live YouTube stream `GotlA1KKWoo`.
 
 Still recommended:
 
