@@ -14285,6 +14285,9 @@
           "path": "scripts/capture-resilience-energy-v2-acceptance.mjs"
         },
         {
+          "path": "scripts/check-live-video-sources.mjs"
+        },
+        {
           "path": "scripts/discover-content-corpus-pages.mjs"
         },
         {
@@ -14431,6 +14434,9 @@
         },
         {
           "path": "scripts/ais-relay.cjs"
+        },
+        {
+          "path": "scripts/check-live-video-sources.mjs"
         },
         {
           "path": "server/worldmonitor/aviation/v1/get-youtube-live-stream-info.ts"
