@@ -125,16 +125,20 @@ export type PlayerObservation =
 export type FailureOutcome =
   | { readonly kind: 'player-error'; readonly code: number }
   | { readonly kind: 'channel-not-live' }
+  /** YouTube lists the video as live but it never played: a scheduled stream's waiting room. */
+  | { readonly kind: 'not-started' }
   | { readonly kind: 'timeout' }
   | { readonly kind: 'hls-http'; readonly status: number }
   | { readonly kind: 'hls-fatal'; readonly detail: string };
+
+export type UnverifiableReason = 'player-api-blocked' | 'player-api-silent' | 'live-signal-missing';
 
 export type AttemptVerdict =
   | { readonly verdict: 'pending' }
   | { readonly verdict: 'live'; readonly video: YouTubeVideoSnapshot | null }
   | { readonly verdict: 'recording'; readonly video: YouTubeVideoSnapshot | null }
   | { readonly verdict: 'failed'; readonly outcome: FailureOutcome }
-  | { readonly verdict: 'unverifiable'; readonly reason: 'player-api-blocked' | 'player-api-silent' };
+  | { readonly verdict: 'unverifiable'; readonly reason: UnverifiableReason };
 
 export type SettledVerdict = Exclude<AttemptVerdict, { verdict: 'pending' }>;
 
@@ -142,11 +146,9 @@ export const LIVE_VIDEO_TIMING = {
   pollMs: 1_000,
   verdictDeadlineMs: 15_000,
   channelEmptyGraceMs: 5_000,
-  durationGrowthWindowMs: 6_000,
+  /** How long isLive=false must hold while playing before the video counts as an ended recording. */
+  recordingConfirmMs: 2_000,
 } as const;
-
-/** A live stream's `getDuration()` is the time since the stream began, so it keeps pace with the wall clock. */
-const LIVE_DURATION_GROWTH_RATIO = 0.5;
 
 const PENDING: AttemptVerdict = { verdict: 'pending' };
 
@@ -154,32 +156,27 @@ function failed(outcome: FailureOutcome): AttemptVerdict {
   return { verdict: 'failed', outcome };
 }
 
-/**
- * Compares the first and last positive samples (a live stream reads 0 before playback settles).
- * 'unknown' until they span the growth window, which is longer than a live segment, so a
- * live stream's duration cannot look flat between segment updates.
- */
-function durationTrend(durations: readonly DurationSample[]): 'growing' | 'flat' | 'unknown' {
+/** True once PLAYING samples with a positive duration span `recordingConfirmMs`. */
+function playedThroughConfirmWindow(durations: readonly DurationSample[]): boolean {
   const positive = durations.filter((sample) => sample.seconds > 0);
   const first = positive[0];
   const last = positive[positive.length - 1];
-  if (!first || !last || last.atMs - first.atMs < LIVE_VIDEO_TIMING.durationGrowthWindowMs) return 'unknown';
-  const grownSeconds = last.seconds - first.seconds;
-  const wallSeconds = (last.atMs - first.atMs) / 1000;
-  if (grownSeconds >= wallSeconds * LIVE_DURATION_GROWTH_RATIO) return 'growing';
-  return grownSeconds === 0 ? 'flat' : 'unknown';
+  return !!first && !!last && last.atMs - first.atMs >= LIVE_VIDEO_TIMING.recordingConfirmMs;
 }
 
 /**
  * First match wins:
  *  api blocked                                   → unverifiable(player-api-blocked)
  *  player error                                  → failed(player-error)
- *  video id + isLive true                        → live
- *  video id + isLive false + duration flat across the growth window → recording
- *  isLive missing, samples span the growth window → live when duration keeps pace, recording when flat
+ *  video id + isLive true + a PLAYING sample     → live (a scheduled stream also says isLive but never plays)
+ *  video id + isLive false, playing through the confirm window → recording
  *  channel embed ready with no video for the grace period → failed(channel-not-live)
- *  deadline: frame loaded but never ready        → unverifiable(player-api-silent), otherwise failed(timeout)
+ *  deadline: frame loaded but never ready        → unverifiable(player-api-silent)
+ *            isLive true but never played        → failed(not-started)
+ *            isLive missing                      → unverifiable(live-signal-missing)
+ *            otherwise                           → failed(timeout)
  *  hls: http/fatal failure → failed; live → live; vod → recording; deadline → failed(timeout)
+ * Duration never decides live: a live stream's getDuration() stays flat while it plays.
  */
 export function classifyAttempt(observation: PlayerObservation): AttemptVerdict {
   if (observation.transport === 'hls') {
@@ -195,14 +192,8 @@ export function classifyAttempt(observation: PlayerObservation): AttemptVerdict 
   const { candidate, elapsedMs, frameLoaded, readyAtMs, errorCode, video, durations } = observation;
   if (errorCode !== null) return failed({ kind: 'player-error', code: errorCode });
 
-  if (video?.videoId && video.isLive === true) return { verdict: 'live', video };
-  const trend = durationTrend(durations);
-  if (video?.videoId && video.isLive === false && trend === 'flat') return { verdict: 'recording', video };
-
-  if (video?.isLive === undefined) {
-    if (trend === 'growing') return { verdict: 'live', video };
-    if (trend === 'flat') return { verdict: 'recording', video };
-  }
+  if (video?.videoId && video.isLive === true && durations.length > 0) return { verdict: 'live', video };
+  if (video?.videoId && video.isLive === false && playedThroughConfirmWindow(durations)) return { verdict: 'recording', video };
 
   if (candidate === 'channel' && readyAtMs !== null && video?.videoId === ''
     && elapsedMs - readyAtMs >= LIVE_VIDEO_TIMING.channelEmptyGraceMs) {
@@ -210,9 +201,12 @@ export function classifyAttempt(observation: PlayerObservation): AttemptVerdict 
   }
 
   if (elapsedMs >= LIVE_VIDEO_TIMING.verdictDeadlineMs) {
-    return frameLoaded && readyAtMs === null
-      ? { verdict: 'unverifiable', reason: 'player-api-silent' }
-      : failed({ kind: 'timeout' });
+    if (readyAtMs === null) {
+      return frameLoaded ? { verdict: 'unverifiable', reason: 'player-api-silent' } : failed({ kind: 'timeout' });
+    }
+    if (video?.videoId && video.isLive === true) return failed({ kind: 'not-started' });
+    if (video?.videoId && video.isLive === undefined) return { verdict: 'unverifiable', reason: 'live-signal-missing' };
+    return failed({ kind: 'timeout' });
   }
   return PENDING;
 }

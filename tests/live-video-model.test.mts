@@ -77,9 +77,9 @@ function youtube(overrides: Partial<Extract<PlayerObservation, { api: 'loaded' }
   };
 }
 
-/** Two PLAYING samples one growth window apart with the same positive duration. */
+/** Two PLAYING samples one confirm window apart with the same positive duration. */
 function flat(seconds: number, fromMs = 2_000): DurationSample[] {
-  return [{ atMs: fromMs, seconds }, { atMs: fromMs + LIVE_VIDEO_TIMING.durationGrowthWindowMs, seconds }];
+  return [{ atMs: fromMs, seconds }, { atMs: fromMs + LIVE_VIDEO_TIMING.recordingConfirmMs, seconds }];
 }
 
 function hls(overrides: Partial<Extract<PlayerObservation, { transport: 'hls' }>> = {}): PlayerObservation {
@@ -108,9 +108,9 @@ describe('classifyAttempt: YouTube', () => {
     assert.equal(classifyAttempt(youtube({ video: snapshot, elapsedMs: 9_000, durations: flat(1_678) })).verdict, 'recording');
   });
 
-  it('needs the duration to stay flat across the growth window before calling isLive=false a recording', () => {
+  it('needs isLive=false to hold while playing for the confirm window before calling a recording', () => {
     const snapshot = video({ videoId: '-Q7FuPINDjA', isLive: false });
-    const windowMs = LIVE_VIDEO_TIMING.durationGrowthWindowMs;
+    const windowMs = LIVE_VIDEO_TIMING.recordingConfirmMs;
     assert.deepEqual(classifyAttempt(youtube({ video: snapshot, durations: [{ atMs: 2_000, seconds: 24_181 }] })), { verdict: 'pending' });
     assert.deepEqual(
       classifyAttempt(youtube({ video: snapshot, durations: [{ atMs: 2_000, seconds: 24_181 }, { atMs: 2_000 + windowMs - 1, seconds: 24_181 }] })),
@@ -118,17 +118,28 @@ describe('classifyAttempt: YouTube', () => {
     );
   });
 
-  it('never calls a playing stream a recording while its duration keeps growing, even if isLive reads false', () => {
-    const windowMs = LIVE_VIDEO_TIMING.durationGrowthWindowMs;
-    const growing = [{ atMs: 2_000, seconds: 4_056_940 }, { atMs: 2_000 + windowMs, seconds: 4_056_940 + windowMs / 1000 }];
-    assert.deepEqual(classifyAttempt(youtube({ video: video({ isLive: false }), elapsedMs: 9_000, durations: growing })), { verdict: 'pending' });
+  it('calls a live stream live although its duration stays flat while playing (Jerusalem zp6LNSoq000, 15,652,510 s)', () => {
+    const snapshot = video({ videoId: 'zp6LNSoq000' });
+    assert.deepEqual(
+      classifyAttempt(youtube({ video: snapshot, elapsedMs: 9_000, durations: flat(15_652_510) })),
+      { verdict: 'live', video: snapshot },
+    );
+  });
+
+  it('never calls a scheduled stream live: isLive=true that never starts playing (NASASpaceflight _7nBPHF-hAE)', () => {
+    const upcoming = video({ videoId: '_7nBPHF-hAE', title: 'Vega C launches Sentinel-3C & FLEX', author: 'NASASpaceflight' });
+    const deadline = LIVE_VIDEO_TIMING.verdictDeadlineMs;
+    assert.deepEqual(classifyAttempt(youtube({ video: upcoming, elapsedMs: deadline - 1 })), { verdict: 'pending' });
+    assert.deepEqual(classifyAttempt(youtube({ video: upcoming, elapsedMs: deadline })), {
+      verdict: 'failed',
+      outcome: { kind: 'not-started' },
+    });
   });
 
   it('ignores zero durations sampled before playback settles', () => {
-    const windowMs = LIVE_VIDEO_TIMING.durationGrowthWindowMs;
+    const windowMs = LIVE_VIDEO_TIMING.recordingConfirmMs;
     const samples = [{ atMs: 1_000, seconds: 0 }, { atMs: 2_000, seconds: 500 }, { atMs: 2_000 + windowMs, seconds: 500 }];
     assert.equal(classifyAttempt(youtube({ video: video({ isLive: false }), elapsedMs: 9_000, durations: samples })).verdict, 'recording');
-    assert.equal(classifyAttempt(youtube({ video: video({ isLive: undefined }), elapsedMs: 9_000, durations: samples })).verdict, 'recording');
   });
 
   it('keeps isLive=false pending while no positive duration has been sampled', () => {
@@ -177,47 +188,20 @@ describe('classifyAttempt: YouTube', () => {
 
   describe('when YouTube stops exposing isLive', () => {
     const noFlag = video({ isLive: undefined });
-    const windowMs = LIVE_VIDEO_TIMING.durationGrowthWindowMs;
+    const windowMs = LIVE_VIDEO_TIMING.recordingConfirmMs;
 
-    it('calls a duration that grows with wall time live', () => {
-      assert.deepEqual(
-        classifyAttempt(youtube({
-          video: noFlag,
-          elapsedMs: 8_000,
-          durations: [{ atMs: 1_000, seconds: 100 }, { atMs: 1_000 + windowMs, seconds: 100 + windowMs / 1000 }],
-        })),
-        { verdict: 'live', video: noFlag },
-      );
+    it('never calls a stream live or a recording from its duration alone', () => {
+      // A live stream's duration stays flat while playing, so duration cannot tell live from ended.
+      const flatSamples = [{ atMs: 1_000, seconds: 500 }, { atMs: 1_000 + 4 * windowMs, seconds: 500 }];
+      const growingSamples = [{ atMs: 1_000, seconds: 100 }, { atMs: 1_000 + 4 * windowMs, seconds: 100 + (4 * windowMs) / 1000 }];
+      assert.deepEqual(classifyAttempt(youtube({ video: noFlag, elapsedMs: 10_000, durations: flatSamples })), { verdict: 'pending' });
+      assert.deepEqual(classifyAttempt(youtube({ video: noFlag, elapsedMs: 10_000, durations: growingSamples })), { verdict: 'pending' });
     });
 
-    it('calls a flat positive duration a recording', () => {
+    it('reports the missing live signal as unverifiable at the deadline', () => {
       assert.deepEqual(
-        classifyAttempt(youtube({
-          video: noFlag,
-          elapsedMs: 8_000,
-          durations: [{ atMs: 1_000, seconds: 500 }, { atMs: 1_000 + windowMs, seconds: 500 }],
-        })),
-        { verdict: 'recording', video: noFlag },
-      );
-    });
-
-    it('waits until the samples span the growth window', () => {
-      assert.deepEqual(
-        classifyAttempt(youtube({
-          video: noFlag,
-          durations: [{ atMs: 1_000, seconds: 100 }, { atMs: 1_000 + windowMs - 1, seconds: 106 }],
-        })),
-        { verdict: 'pending' },
-      );
-    });
-
-    it('stays pending when the duration grows too slowly to be live', () => {
-      assert.deepEqual(
-        classifyAttempt(youtube({
-          video: noFlag,
-          durations: [{ atMs: 1_000, seconds: 100 }, { atMs: 1_000 + windowMs, seconds: 101 }],
-        })),
-        { verdict: 'pending' },
+        classifyAttempt(youtube({ video: noFlag, elapsedMs: LIVE_VIDEO_TIMING.verdictDeadlineMs, durations: flat(500) })),
+        { verdict: 'unverifiable', reason: 'live-signal-missing' },
       );
     });
   });

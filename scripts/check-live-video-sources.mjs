@@ -75,29 +75,25 @@ function why(result) {
   const isHls = result.parsed.candidate.kind === 'hls';
   switch (verdict.verdict) {
     case 'live':
-      if (isHls) return 'HLS playlist is live';
-      return verdict.video?.isLive === true
-        ? 'YouTube reports a live stream (isLive=true)'
-        : 'duration keeps pace with the clock (isLive missing)';
+      return isHls ? 'HLS playlist is live' : 'YouTube reports a live stream (isLive=true) and it is playing';
     case 'recording':
       if (isHls) return 'HLS playlist has ended (VOD or ENDLIST)';
-      return verdict.video?.isLive === false
-        ? `ended recording (isLive=false, duration ${formatSeconds(result.durationSeconds ?? 0)})`
-        : `ended recording (duration stopped at ${formatSeconds(result.durationSeconds ?? 0)}, isLive missing)`;
+      return `ended recording (isLive=false, duration ${formatSeconds(result.durationSeconds ?? 0)})`;
     case 'failed': {
       const { outcome } = verdict;
       if (outcome.kind === 'player-error') {
         return `YouTube player error ${outcome.code}: ${PLAYER_ERROR_WHY[outcome.code] ?? 'unknown error'}`;
       }
       if (outcome.kind === 'channel-not-live') return 'the channel has no live stream right now';
+      if (outcome.kind === 'not-started') return `scheduled or not started: YouTube lists it as live but it did not play within ${LIVE_VIDEO_TIMING.verdictDeadlineMs / 1000} s`;
       if (outcome.kind === 'timeout') return `no verdict within ${LIVE_VIDEO_TIMING.verdictDeadlineMs / 1000} s`;
       if (outcome.kind === 'hls-http') return `manifest returned HTTP ${outcome.status}`;
       return `stream failed: ${outcome.detail}`;
     }
     case 'unverifiable':
-      return verdict.reason === 'player-api-blocked'
-        ? 'the YouTube IFrame API did not load'
-        : 'the player frame loaded but never became ready';
+      if (verdict.reason === 'player-api-blocked') return 'the YouTube IFrame API did not load';
+      if (verdict.reason === 'live-signal-missing') return 'the player no longer reports whether a video is live (isLive missing)';
+      return 'the player frame loaded but never became ready';
   }
   return 'unknown verdict';
 }

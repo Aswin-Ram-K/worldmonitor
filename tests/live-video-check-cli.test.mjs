@@ -65,13 +65,14 @@ describe('formatCheckLine', () => {
     assert.match(text, /paste: 'https:\/\/www\.youtube\.com\/channel\/UCknLrEdhRCp1aegoMqRaCZg'/);
   });
 
-  it('names the duration-growth rule when isLive is missing', () => {
-    const text = formatCheckLine({
-      name: null,
-      parsed: parsed('gCNeDWCI0vo'),
-      verdict: { verdict: 'live', video: { videoId: 'gCNeDWCI0vo', isLive: undefined, title: 'AJ', author: 'Al Jazeera English' } },
-    });
-    assert.match(text, /why: duration keeps pace with the clock \(isLive missing\)/);
+  it('explains a stream that never started and a missing live signal', () => {
+    const entry = parsed('_7nBPHF-hAE');
+    const notStarted = formatCheckLine({ name: null, parsed: entry, verdict: { verdict: 'failed', outcome: { kind: 'not-started' } } });
+    assert.match(notStarted, /^FAILED/m);
+    assert.match(notStarted, /why: scheduled or not started/);
+    const noSignal = formatCheckLine({ name: null, parsed: entry, verdict: { verdict: 'unverifiable', reason: 'live-signal-missing' } });
+    assert.match(noSignal, /^UNVERIFIED/m);
+    assert.match(noSignal, /why: .*isLive missing/);
   });
 
   it('explains an ended recording with its duration and gives no paste line', () => {
