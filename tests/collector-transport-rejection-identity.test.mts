@@ -116,6 +116,44 @@ describe('collector transport rejection identity (WORLDMONITOR-Z6/ZG)', () => {
     assert.match(wrapped.message, /Failed to fetch$/);
   });
 
+  it('installs cause via ErrorOptions — no class-field write (WORLDMONITOR-12E)', () => {
+    // Production Chrome threw while constructing CollectorTransportError:
+    // `Cannot add property cause, object is not extensible`. The esbuild
+    // `__publicField(this, "cause")` emit from a class-field declaration was
+    // the write that failed; the resulting TypeError bypassed the beacon
+    // ignoreErrors marker and filed as a first-party theme-colors frame.
+    const source = readFileSync(
+      new URL('../src/services/analytics-collector-transport.ts', import.meta.url),
+      'utf8',
+    );
+    const classBody = source.slice(
+      source.indexOf('export class CollectorTransportError'),
+      source.indexOf('export const COLLECTOR_QUEUE_LIMIT'),
+    );
+    // Strip block comments so prose mentioning the forbidden assignment cannot
+    // trip the pin (the class comment deliberately names that anti-pattern).
+    const codeOnly = classBody.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+    assert.equal(
+      /^\s*readonly cause\s*:/m.test(codeOnly),
+      false,
+      'CollectorTransportError must not declare a runtime cause class field',
+    );
+    assert.equal(
+      /this\.cause\s*=/.test(codeOnly),
+      false,
+      'CollectorTransportError must not assign this.cause after super()',
+    );
+    assert.match(
+      codeOnly,
+      /super\(\s*`Umami collector beacon transport rejected:[^`]*`,\s*\{\s*cause\s*\}\s*\)/,
+    );
+
+    const inner = new TypeError('Failed to fetch');
+    const wrapped = new CollectorTransportError(inner);
+    assert.equal(wrapped.cause, inner);
+    assert.equal(wrapped.name, 'CollectorTransportError');
+  });
+
   it('the shipped Sentry ignoreErrors entry matches that exact message', () => {
     // Read the pattern out of the shipped config rather than restating it, so a
     // rename on either side fails here instead of silently un-filtering the

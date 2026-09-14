@@ -194,13 +194,23 @@ export class CollectorDeliveryError extends Error {
  * wrapped timeout into `network`.
  */
 export class CollectorTransportError extends Error {
-  readonly cause: unknown;
+  // Do NOT declare a runtime `cause` class field and do NOT assign
+  // `this['cause']` after `super()`. esbuild emits `__publicField(this, "cause")`
+  // for a field, and on some Chrome Error instances that write throws:
+  //   TypeError: Cannot add property cause, object is not extensible
+  // The throw replaces the intentional beacon marker with an unfiltered
+  // first-party TypeError (WORLDMONITOR-12E) — `ignoreErrors` only matches
+  // `Umami collector beacon transport rejected`, so construction must not fail.
+  // Pass `cause` through ErrorOptions so the engine installs it during `super`.
+  // `declare` keeps the TypeScript shape without emitting a runtime field write.
+  declare readonly cause: unknown;
 
   constructor(cause: unknown) {
     const detail = cause instanceof Error ? cause.message : String(cause);
-    super(`Umami collector beacon transport rejected: ${detail}`);
+    // ErrorOptions.cause is ES2022; tsconfig lib stops at ES2020.
+    // @ts-expect-error -- second Error argument is ES2022 ErrorOptions
+    super(`Umami collector beacon transport rejected: ${detail}`, { cause });
     this.name = 'CollectorTransportError';
-    this.cause = cause;
   }
 }
 
