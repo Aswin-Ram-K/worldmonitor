@@ -86,6 +86,16 @@ describe('formatCheckLine', () => {
     assert.doesNotMatch(text, /paste:/);
   });
 
+  it('prints the author without empty quotes when the title is missing', () => {
+    const text = formatCheckLine({
+      name: null,
+      parsed: parsed('zp6LNSoq000'),
+      verdict: { verdict: 'live', video: { videoId: 'zp6LNSoq000', isLive: true, title: '', author: 'Mt. of Olives Prayer Bridge' } },
+    });
+    assert.match(text, /zp6LNSoq000\s+by Mt\. of Olives Prayer Bridge$/m);
+    assert.doesNotMatch(text, /""/);
+  });
+
   it('explains a player error', () => {
     const text = formatCheckLine({
       name: null,
@@ -144,6 +154,14 @@ describe('observationFromRecord', () => {
       video: { videoId: '', isLive: undefined, title: '', author: '' },
       durations: [],
     });
+  });
+
+  it('reads missing readings as not yet observed', () => {
+    const observation = observationFromRecord({ kind: 'video', apiBlocked: false, mounted: true, elapsedMs: 1_000, frameLoaded: true });
+    assert.equal(observation.errorCode, null);
+    assert.equal(observation.readyAtMs, null);
+    assert.equal(observation.video, null);
+    assert.deepEqual(observation.durations, []);
   });
 
   it('reports a blocked IFrame API', () => {

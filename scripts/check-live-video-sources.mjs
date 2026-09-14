@@ -107,7 +107,7 @@ export function formatCheckLine(result) {
   const video = result.verdict?.video ?? null;
   let subject = result.parsed.ok ? canonicalEntry(result.parsed.candidate) : result.parsed.entry;
   if (result.parsed.ok && result.parsed.candidate.kind === 'channel' && video?.videoId) subject += ` → ${video.videoId}`;
-  const byline = video && (video.title || video.author) ? `"${video.title}" by ${video.author}` : null;
+  const byline = [video?.title && `"${video.title}"`, video?.author && `by ${video.author}`].filter(Boolean).join(' ') || null;
   const head = [verdictLabel(result).padEnd(10), result.name, subject, byline].filter(Boolean).join('  ');
   const lines = [head, `${INDENT}why: ${why(result)}`];
   if (result.parsed.ok && result.verdict.verdict === 'live') lines.push(`${INDENT}paste: '${canonicalEntry(result.parsed.candidate)}'`);
@@ -135,10 +135,10 @@ export function observationFromRecord(record) {
     candidate: record.kind,
     elapsedMs: record.elapsedMs,
     frameLoaded: record.frameLoaded,
-    readyAtMs: record.readyAtMs,
-    errorCode: record.errorCode,
+    readyAtMs: record.readyAtMs ?? null,
+    errorCode: record.errorCode ?? null,
     video,
-    durations: record.durations,
+    durations: record.durations ?? [],
   };
 }
 

@@ -91,7 +91,7 @@ describe('DIRECT_HLS_MAP integrity', () => {
 
   it('no HLS URL points at a slate clip', () => {
     // CNN's cnn_slate playlist is a ~10-minute VOD (#EXT-X-ENDLIST) that played under a LIVE label.
-    const slates = hlsMapEntries.filter(({ url }) => /slate/i.test(url)).map(({ id }) => id);
+    const slates = hlsMapEntries.filter(({ url }) => /cnn_slate|[/_-]slate[/_.-]/i.test(url)).map(({ id }) => id);
     assert.deepEqual(slates, [], 'a slate is a recording, not a live stream; use the channel\'s live YouTube fallback');
   });
 });

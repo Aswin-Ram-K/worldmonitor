@@ -184,7 +184,7 @@ export const OPTIONAL_LIVE_CHANNELS: LiveChannel[] = [
   { id: 'euronews-gr', name: 'Euronews GR', handle: '@euronewsgr' },
   { id: 'skai-tv', name: 'SKAI TV', handle: '@skaitv' },
   { id: 'ert-news', name: 'ERT News', handle: '@ertgr', hlsUrl: 'https://ertflix.ascdn.broadpeak.io/ertlive/ertnews/default/index.m3u8', useFallbackOnly: true },
-  { id: 'france24-fr', name: 'France 24 FR', handle: '@France24_fr' },
+  { id: 'france24-fr', name: 'France 24 FR', handle: '@France24_fr', fallbackVideoId: 'a47ckXKZjxI' },
   { id: 'france-info', name: 'France Info', handle: '@franceinfo' },
   { id: 'bfmtv', name: 'BFMTV', handle: '@BFMTV' },
   { id: 'tv5monde-info', name: 'TV5 Monde Info', handle: '@TV5MONDEInfo', hlsUrl: 'https://ott.tv5monde.com/Content/HLS/Live/channel(info)/index.m3u8', geoAvailability: ['FR', 'BE', 'CH', 'CA'] },

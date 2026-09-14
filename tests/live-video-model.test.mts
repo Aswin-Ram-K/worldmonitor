@@ -3,6 +3,7 @@ import { describe, it } from 'node:test';
 
 import {
   classifyAttempt,
+  type DurationSample,
   LIVE_VIDEO_TIMING,
   parseSourceEntry,
   type PlayerObservation,
@@ -76,6 +77,11 @@ function youtube(overrides: Partial<Extract<PlayerObservation, { api: 'loaded' }
   };
 }
 
+/** Two PLAYING samples one growth window apart with the same positive duration. */
+function flat(seconds: number, fromMs = 2_000): DurationSample[] {
+  return [{ atMs: fromMs, seconds }, { atMs: fromMs + LIVE_VIDEO_TIMING.durationGrowthWindowMs, seconds }];
+}
+
 function hls(overrides: Partial<Extract<PlayerObservation, { transport: 'hls' }>> = {}): PlayerObservation {
   return { transport: 'hls', elapsedMs: 800, manifest: 'unknown', failure: null, ...overrides };
 }
@@ -92,14 +98,37 @@ describe('classifyAttempt: YouTube', () => {
   it('calls an ended stream a recording (Kyiv -Q7FuPINDjA, isLive=false, duration 24,181 s)', () => {
     const snapshot = video({ videoId: '-Q7FuPINDjA', isLive: false, author: 'DW News' });
     assert.deepEqual(
-      classifyAttempt(youtube({ video: snapshot, durations: [{ atMs: 2_000, seconds: 24_181 }] })),
+      classifyAttempt(youtube({ video: snapshot, elapsedMs: 9_000, durations: flat(24_181) })),
       { verdict: 'recording', video: snapshot },
     );
   });
 
   it('calls a short ended stream a recording (Shanghai 76EwqI5XZIc, duration 1,678 s)', () => {
     const snapshot = video({ videoId: '76EwqI5XZIc', isLive: false });
-    assert.equal(classifyAttempt(youtube({ video: snapshot, durations: [{ atMs: 2_000, seconds: 1_678 }] })).verdict, 'recording');
+    assert.equal(classifyAttempt(youtube({ video: snapshot, elapsedMs: 9_000, durations: flat(1_678) })).verdict, 'recording');
+  });
+
+  it('needs the duration to stay flat across the growth window before calling isLive=false a recording', () => {
+    const snapshot = video({ videoId: '-Q7FuPINDjA', isLive: false });
+    const windowMs = LIVE_VIDEO_TIMING.durationGrowthWindowMs;
+    assert.deepEqual(classifyAttempt(youtube({ video: snapshot, durations: [{ atMs: 2_000, seconds: 24_181 }] })), { verdict: 'pending' });
+    assert.deepEqual(
+      classifyAttempt(youtube({ video: snapshot, durations: [{ atMs: 2_000, seconds: 24_181 }, { atMs: 2_000 + windowMs - 1, seconds: 24_181 }] })),
+      { verdict: 'pending' },
+    );
+  });
+
+  it('never calls a playing stream a recording while its duration keeps growing, even if isLive reads false', () => {
+    const windowMs = LIVE_VIDEO_TIMING.durationGrowthWindowMs;
+    const growing = [{ atMs: 2_000, seconds: 4_056_940 }, { atMs: 2_000 + windowMs, seconds: 4_056_940 + windowMs / 1000 }];
+    assert.deepEqual(classifyAttempt(youtube({ video: video({ isLive: false }), elapsedMs: 9_000, durations: growing })), { verdict: 'pending' });
+  });
+
+  it('ignores zero durations sampled before playback settles', () => {
+    const windowMs = LIVE_VIDEO_TIMING.durationGrowthWindowMs;
+    const samples = [{ atMs: 1_000, seconds: 0 }, { atMs: 2_000, seconds: 500 }, { atMs: 2_000 + windowMs, seconds: 500 }];
+    assert.equal(classifyAttempt(youtube({ video: video({ isLive: false }), elapsedMs: 9_000, durations: samples })).verdict, 'recording');
+    assert.equal(classifyAttempt(youtube({ video: video({ isLive: undefined }), elapsedMs: 9_000, durations: samples })).verdict, 'recording');
   });
 
   it('keeps isLive=false pending while no positive duration has been sampled', () => {

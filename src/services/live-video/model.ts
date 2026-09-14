@@ -154,15 +154,20 @@ function failed(outcome: FailureOutcome): AttemptVerdict {
   return { verdict: 'failed', outcome };
 }
 
-function classifyDurationGrowth(durations: readonly DurationSample[], video: YouTubeVideoSnapshot | null): AttemptVerdict {
-  const first = durations[0];
-  const last = durations[durations.length - 1];
-  if (!first || !last || last.atMs - first.atMs < LIVE_VIDEO_TIMING.durationGrowthWindowMs) return PENDING;
+/**
+ * Compares the first and last positive samples (a live stream reads 0 before playback settles).
+ * 'unknown' until they span the growth window, which is longer than a live segment, so a
+ * live stream's duration cannot look flat between segment updates.
+ */
+function durationTrend(durations: readonly DurationSample[]): 'growing' | 'flat' | 'unknown' {
+  const positive = durations.filter((sample) => sample.seconds > 0);
+  const first = positive[0];
+  const last = positive[positive.length - 1];
+  if (!first || !last || last.atMs - first.atMs < LIVE_VIDEO_TIMING.durationGrowthWindowMs) return 'unknown';
   const grownSeconds = last.seconds - first.seconds;
   const wallSeconds = (last.atMs - first.atMs) / 1000;
-  if (grownSeconds >= wallSeconds * LIVE_DURATION_GROWTH_RATIO) return { verdict: 'live', video };
-  if (grownSeconds === 0 && last.seconds > 0) return { verdict: 'recording', video };
-  return PENDING;
+  if (grownSeconds >= wallSeconds * LIVE_DURATION_GROWTH_RATIO) return 'growing';
+  return grownSeconds === 0 ? 'flat' : 'unknown';
 }
 
 /**
@@ -170,7 +175,7 @@ function classifyDurationGrowth(durations: readonly DurationSample[], video: You
  *  api blocked                                   → unverifiable(player-api-blocked)
  *  player error                                  → failed(player-error)
  *  video id + isLive true                        → live
- *  video id + isLive false + sampled duration > 0 → recording
+ *  video id + isLive false + duration flat across the growth window → recording
  *  isLive missing, samples span the growth window → live when duration keeps pace, recording when flat
  *  channel embed ready with no video for the grace period → failed(channel-not-live)
  *  deadline: frame loaded but never ready        → unverifiable(player-api-silent), otherwise failed(timeout)
@@ -190,13 +195,13 @@ export function classifyAttempt(observation: PlayerObservation): AttemptVerdict 
   const { candidate, elapsedMs, frameLoaded, readyAtMs, errorCode, video, durations } = observation;
   if (errorCode !== null) return failed({ kind: 'player-error', code: errorCode });
 
-  const lastDuration = durations[durations.length - 1]?.seconds ?? 0;
   if (video?.videoId && video.isLive === true) return { verdict: 'live', video };
-  if (video?.videoId && video.isLive === false && lastDuration > 0) return { verdict: 'recording', video };
+  const trend = durationTrend(durations);
+  if (video?.videoId && video.isLive === false && trend === 'flat') return { verdict: 'recording', video };
 
   if (video?.isLive === undefined) {
-    const byDuration = classifyDurationGrowth(durations, video);
-    if (byDuration.verdict !== 'pending') return byDuration;
+    if (trend === 'growing') return { verdict: 'live', video };
+    if (trend === 'flat') return { verdict: 'recording', video };
   }
 
   if (candidate === 'channel' && readyAtMs !== null && video?.videoId === ''
