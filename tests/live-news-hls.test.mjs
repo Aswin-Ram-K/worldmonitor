@@ -102,6 +102,22 @@ describe('channel data integrity', () => {
     }
   });
 
+  it('no two webcam feeds play the same video', () => {
+    const ids = [...liveWebcamsSrc.matchAll(/fallbackVideoId:\s*'([^']+)'/g)].map((m) => m[1]);
+    assert.ok(ids.length > 0, 'no webcam fallbackVideoId found');
+    const repeated = ids.filter((id, index) => ids.indexOf(id) !== index);
+    assert.deepEqual(repeated, [], 'point one webcam feed at a stream instead of listing the same video twice');
+  });
+
+  it('every default webcam grid id names a webcam feed', () => {
+    const gridIds = liveWebcamsSrc.match(/ALL_GRID_IDS\s*=\s*\[([^\]]*)\]/)?.[1];
+    assert.ok(gridIds, 'ALL_GRID_IDS not found');
+    const feedIds = new Set([...liveWebcamsSrc.matchAll(/\{\s*id:\s*'([^']+)',\s*city:/g)].map((m) => m[1]));
+    for (const [, id] of gridIds.matchAll(/'([^']+)'/g)) {
+      assert.ok(feedIds.has(id), `ALL_GRID_IDS '${id}' has no WEBCAM_FEEDS entry`);
+    }
+  });
+
   it('no channel ID appears in multiple arrays with conflicting definitions', () => {
     const allIds = [...fullIds, ...techIds, ...optionalIds];
     const counts = {};
