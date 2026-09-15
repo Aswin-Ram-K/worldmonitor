@@ -28,8 +28,8 @@ export function isAdvisorySnapshot(value) {
 
 export function isGdeltArticle(value) {
   return record(value) && text(value.title) && text(value.url)
-    && optionalStrings(value, ['source', 'date', 'image', 'language'])
-    && (value.tone == null || (typeof value.tone === 'number' && Number.isFinite(value.tone)));
+    && ['source', 'date', 'image', 'language'].every(field => typeof value[field] === 'string')
+    && typeof value.tone === 'number' && Number.isFinite(value.tone);
 }
 
 export function isGdeltSearchResponse(value) {

@@ -36,7 +36,7 @@ test('GDELT topics distinguish empty matches from unavailable or malformed seed 
   let failure = false;
   t.mock.method(globalThis, 'fetch', async () => failure ? new Response('', { status: 503 }) : Response.json({ result: value === null ? null : JSON.stringify(value) }));
   const call = () => searchGdeltDocuments({} as never, { query: 'military', maxRecords: 10, timespan: '', toneFilter: '', sort: '' });
-  for (const invalid of [null, {}, { topics: [] }, { topics: [{ id: 'military', articles: [] }], fallback: true }, { topics: {} }, { topics: [null] }, { topics: [{ id: 'military', articles: [{ title: 3 }] }] }]) {
+  for (const invalid of [null, {}, { topics: [] }, { topics: [{ id: 'military', articles: [] }], fallback: true }, { topics: {} }, { topics: [null] }, { topics: [{ id: 'military', articles: [{ title: 'Missing fields', url: 'https://example.com/news' }] }] }, { topics: [{ id: 'military', articles: [{ title: 3 }] }] }]) {
     value = invalid;
     assert.ok((await call()).error);
   }
