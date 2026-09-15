@@ -471,6 +471,14 @@ function scheduleAfterNextPaint(fn: () => void): () => void {
   };
 }
 
+function shouldAbortSlowTierOnTimeout(): boolean {
+  try {
+    return import.meta.env.VITE_E2E !== '1';
+  } catch {
+    return true;
+  }
+}
+
 function scheduleSlowTierFetch(generation: number, onSlowSettled?: () => void): Promise<void> {
   const desktop = isDesktopRuntime();
   const isCurrentGeneration = (): boolean => generation === bootstrapGeneration;
@@ -484,7 +492,7 @@ function scheduleSlowTierFetch(generation: number, onSlowSettled?: () => void): 
 
       const slowCtrl = new AbortController();
       activeSlowCtrl = slowCtrl;
-      const abortSlowTier = import.meta.env?.VITE_E2E !== '1';
+      const abortSlowTier = shouldAbortSlowTierOnTimeout();
       const slowTimeout = abortSlowTier
         ? setTimeout(
           () => slowCtrl.abort(),
