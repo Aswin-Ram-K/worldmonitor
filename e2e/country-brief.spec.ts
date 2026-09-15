@@ -655,3 +655,40 @@ for (const { mobile, light } of [{ mobile: false, light: false }, { mobile: true
     expect(await output.evaluate(el => el.scrollWidth <= el.clientWidth + 1)).toBe(true);
   }
 });
+
+test('GDELT availability failure shows an error and a recovered empty result clears it', async ({ page, countryBrief }, testInfo) => {
+  void countryBrief;
+  let unavailable = true;
+  let requests = 0;
+  await page.route('**/api/intelligence/v1/search-gdelt-documents*', async route => {
+    requests++;
+    await route.fulfill({ json: { articles: [], query: 'military', error: unavailable ? 'seed-unavailable' : '' } });
+  });
+  await page.goto('/dashboard');
+  const panel = page.locator('[data-panel="gdelt-intel"]');
+  await panel.scrollIntoViewIfNeeded();
+  await expect(panel).toBeVisible();
+  await expect(panel.locator('.panel-header')).toHaveClass(/panel-header-error/);
+  expect(requests).toBeGreaterThan(0);
+  const framePanel = async () => {
+    await panel.evaluate(element => {
+      element.scrollIntoView({ block: 'start', behavior: 'instant' });
+      for (let parent = element.parentElement; parent; parent = parent.parentElement) {
+        if (parent.scrollHeight > parent.clientHeight && /auto|scroll/.test(getComputedStyle(parent).overflowY)) {
+          parent.scrollTop = Math.max(0, parent.scrollTop - 96);
+          break;
+        }
+      }
+    });
+    await expect(panel.locator('.panel-header')).toBeInViewport();
+  };
+  await framePanel();
+  await page.screenshot({ path: testInfo.outputPath('gdelt-unavailable.png') });
+  const failedRequests = requests;
+  unavailable = false;
+  await expect.poll(() => requests).toBeGreaterThan(failedRequests);
+  await expect(panel.locator('.empty-state')).toBeVisible();
+  await expect(panel.locator('.panel-header')).not.toHaveClass(/panel-header-error/);
+  await framePanel();
+  await page.screenshot({ path: testInfo.outputPath('gdelt-recovered-empty.png') });
+});
