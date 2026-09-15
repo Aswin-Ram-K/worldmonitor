@@ -1,3 +1,5 @@
+import { parseImfDataset } from '../../shared/imf-dataset.js';
+
 /**
  * IMF WEO per-country data — fetches the four IMF SDMX-3.0 seeded keys
  * (macro, growth, labor, external) via /api/bootstrap and returns the
@@ -62,40 +64,10 @@ export interface ImfCountryBundle {
 type ImfEntries = { macro: ImfMacroEntry; growth: ImfGrowthEntry; labor: ImfLaborEntry; external: ImfExternalEntry };
 type ImfTheme = keyof ImfEntries;
 type ImfDataset<K extends ImfTheme> = { countries: Record<string, ImfEntries[K]>; seededAt: number };
-const THEMES = {
-  macro: { key: 'imfMacro', fields: ['inflationPct', 'currentAccountPct', 'govRevenuePct', 'cpiIndex', 'cpiEopPct', 'govExpenditurePct', 'primaryBalancePct', 'year'] },
-  growth: { key: 'imfGrowth', fields: ['realGdpGrowthPct', 'gdpPerCapitaUsd', 'realGdpLcuB', 'realGdp', 'gdpPerCapitaPpp', 'gdpPpp', 'investmentPct', 'savingsPct', 'savingsInvestmentGap', 'year'] },
-  labor: { key: 'imfLabor', fields: ['unemploymentPct', 'populationMillions', 'year'] },
-  external: { key: 'imfExternal', fields: ['exportsUsd', 'importsUsd', 'tradeBalanceUsd', 'currentAccountUsd', 'importVolumePctChg', 'exportVolumePctChg', 'year'] },
-} as const;
+const THEMES = { macro: 'imfMacro', growth: 'imfGrowth', labor: 'imfLabor', external: 'imfExternal' } as const;
 const CACHE_TTL_MS = 10 * 60 * 1000;
 const cached = new Map<ImfTheme, { acceptedAt: number; data: ImfDataset<ImfTheme> }>();
 const pending = new Map<ImfTheme, Promise<ImfDataset<ImfTheme> | undefined>>();
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function validateDataset<K extends ImfTheme>(theme: K, value: unknown): ImfDataset<K> | undefined {
-  if (!isRecord(value) || !isRecord(value.countries) || value.error || value.fallback || value.dataAvailable === false) return undefined;
-  const countries: Record<string, ImfEntries[K]> = {};
-  for (const [code, raw] of Object.entries(value.countries)) {
-    if (!/^[A-Z]{2}$/.test(code) || !isRecord(raw)) return undefined;
-    const entry: Record<string, number | null> = {};
-    for (const field of THEMES[theme].fields) {
-      const v = raw[field];
-      if (v != null && (typeof v !== 'number' || !Number.isFinite(v))) return undefined;
-      if (field === 'year' && v != null && (!Number.isInteger(v) || v < 1900 || v > 2200)) return undefined;
-      entry[field] = typeof v === 'number' ? v : null;
-    }
-    if (!Object.entries(entry).some(([field, v]) => field !== 'year' && v !== null)) return undefined;
-    countries[code] = entry as unknown as ImfEntries[K];
-  }
-  // WEO themes are global datasets: an empty map is not a confirmed global all-clear.
-  if (Object.keys(countries).length === 0) return undefined;
-  const seededAt = typeof value.seededAt === 'string' ? Date.parse(value.seededAt) : NaN;
-  return { countries, seededAt: Number.isFinite(seededAt) && seededAt > 0 ? seededAt : 0 };
-}
 
 async function fetchDataset<K extends ImfTheme>(theme: K): Promise<ImfDataset<K> | undefined> {
   const previous = cached.get(theme);
@@ -105,7 +77,7 @@ async function fetchDataset<K extends ImfTheme>(theme: K): Promise<ImfDataset<K>
   const request = (async () => {
     try {
       const { ensureHydrated } = await import('@/services/bootstrap');
-      const data = validateDataset(theme, await ensureHydrated(THEMES[theme].key));
+      const data = parseImfDataset(THEMES[theme], await ensureHydrated(THEMES[theme])) as ImfDataset<K> | undefined;
       if (data) cached.set(theme, { acceptedAt: Date.now(), data });
       return data;
     } catch {

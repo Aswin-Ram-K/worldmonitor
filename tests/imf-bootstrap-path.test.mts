@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import { before, beforeEach, afterEach, test } from 'node:test';
 import { build } from 'esbuild';
@@ -97,4 +98,8 @@ test('concurrent readers share existing hydration without a failed second reques
   globalThis.fetch = async () => { calls++; throw new Error('offline'); };
   const [a, b] = await Promise.all([app.getImfCountryBundle('UA'), app.getImfCountryBundle('UA')]);
   assert.deepEqual(a, b); assert.equal(a.macro?.inflationPct, 4); assert.equal(calls, 0);
+});
+
+test('browser and edge IMF validators stay identical', () => {
+  assert.equal(readFileSync('shared/imf-dataset.js', 'utf8'), readFileSync('api/_imf-dataset.js', 'utf8'));
 });
