@@ -24,7 +24,7 @@ tags: [youtube, live-video, relay-fetch, railway-relay, fallback-video-ids, idle
 
 ## Problem
 
-The dashboard's "TV screen" (Live News and Live Webcams) looks healthy for a few minutes, then fails in three independent ways. None of them raises an error or an alarm. A cancelling paying user reported it on 2026-09-14: "your dashboard only last for about 4 minutes. you have the wrong video links in the tv screen". Each part of that report maps to a verified defect. Defect 1 is fixed by #8155. Defect 3 has a data fix and a liveness checker on branch `fix/live-video-links`. Defect 2 has no fix yet. This doc records the diagnosis, the audit method, and the fixes.
+The dashboard's "TV screen" (Live News and Live Webcams) looks healthy for a few minutes, then fails in three independent ways. None of them raises an error or an alarm. A cancelling paying user reported it on 2026-09-14: "your dashboard only last for about 4 minutes. you have the wrong video links in the tv screen". Each part of that report maps to a verified defect. Defect 1 is fixed by #8155. Defect 3 has a data fix and a liveness checker in #8163. Defect 2 has no fix yet. This doc records the diagnosis, the audit method, and the fixes.
 
 ## Symptoms
 
@@ -46,7 +46,7 @@ These approaches gave wrong or misleading readings during diagnosis.
 
 ## Solution
 
-Status: diagnosis verified against production and against the code at 618757b97b. The Defect 1 fix merged in #8155. Defect 3 has a data fix and a liveness checker on branch `fix/live-video-links`; runtime detection of streams that end later is still to come. The Defect 2 fixes below remain recommendations.
+Status: diagnosis verified against production and against the code at 618757b97b. The Defect 1 fix merged in #8155. Defect 3 has a data fix and a liveness checker in #8163; runtime detection of streams that end later is still to come. The Defect 2 fixes below remain recommendations.
 
 ### Defect 1: the 5-minute idle stop ("only lasts about 4 minutes")
 
@@ -144,9 +144,14 @@ The current tree has 47 unique Live News fallback IDs. The session audited 46 an
 
 The existing structural tests only check presence. `tests/live-news-hls.test.mjs:63-71` checks that each `DIRECT_HLS_MAP` channel has a fallback ID, an `hlsUrl`, or a handle. `:96-101` checks that full-variant channels have a `fallbackVideoId`. No test, script, or workflow checks whether an ID is still live.
 
-Fix (branch `fix/live-video-links`, 2026-09-14):
+Fix (#8163, 2026-09-14):
 
-- `npm run live-video:check -- <video URL, channel URL, video ID or https .m3u8> ...` plays each YouTube entry in headless Chromium as if embedded on `https://www.worldmonitor.app`. It classifies the player with `classifyAttempt` (`src/services/live-video/model.ts`): live when the player reports `isLive`, an ended recording when `isLive` is false with a duration, and failed on a player error such as 150. HLS entries are fetched and read as live or VOD. It exits 1 when any entry is not live.
+- `npm run live-video:check -- <video URL, channel URL, video ID or https .m3u8> ...` plays each YouTube entry in headless Chromium as if embedded on `https://www.worldmonitor.app`. It classifies the player with `classifyAttempt` (`src/services/live-video/model.ts`) and exits 1 when any entry is not live. The rules:
+  - A player error such as 150 is failed.
+  - `isLive` true plus a sample taken while the player is PLAYING is live. A scheduled stream also reports `isLive` true but never plays.
+  - `isLive` false that holds while playing through the recording-confirm window (`recordingConfirmMs`, 2 s) is an ended recording.
+  - At the 15 s verdict deadline, `isLive` true that never played is not started (failed), and a missing `isLive` is unverifiable.
+  - An HLS entry's media playlist is fetched twice, one target duration apart (clamped to 1-10 s and to the deadline). It is live only if the playlist advanced: a higher `#EXT-X-MEDIA-SEQUENCE`, a different last segment, or more segments. `#EXT-X-ENDLIST` or `#EXT-X-PLAYLIST-TYPE:VOD` is a recording, and a playlist that did not advance fails. `#EXT-X-PROGRAM-DATE-TIME` is not a liveness signal, because a frozen playlist keeps it.
 - Every webcam and Live News `fallbackVideoId` was re-checked with it. Dead or ended IDs were replaced with verified live streams, most of them found by the owner. Where no live stream exists, the ID was removed: the tel-aviv, beirut-mtv, nasa-live and space-x webcams are gone, and 25 optional Live News channels lost their dead fallback. The odessa webcam was folded into one Ukraine feed that rotates through several cities, and the unused `channelHandle` field was deleted.
 - The checker also read CNN's `DIRECT_HLS_MAP` stream (`cnn_slate`) as a recording: a playlist with `#EXT-X-ENDLIST`, about 10 minutes long, that played under a LIVE label on web. It was removed, so CNN plays its live YouTube stream `GotlA1KKWoo`.
 

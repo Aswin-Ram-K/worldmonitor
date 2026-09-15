@@ -75,7 +75,7 @@ function why(result) {
   const isHls = result.parsed.candidate.kind === 'hls';
   switch (verdict.verdict) {
     case 'live':
-      return isHls ? 'HLS playlist is live' : 'YouTube reports a live stream (isLive=true) and it is playing';
+      return isHls ? 'HLS playlist is live (it advanced between two fetches)' : 'YouTube reports a live stream (isLive=true) and it is playing';
     case 'recording':
       if (isHls) return 'HLS playlist has ended (VOD or ENDLIST)';
       return `ended recording (isLive=false, duration ${formatSeconds(result.durationSeconds ?? 0)})`;
@@ -278,32 +278,85 @@ async function probeYouTubeWithBrowser(candidates) {
   }
 }
 
-export function classifyHlsPlaylist(text) {
-  if (!text.trimStart().startsWith('#EXTM3U')) return 'unknown';
-  if (/#EXT-X-ENDLIST|#EXT-X-PLAYLIST-TYPE:VOD/.test(text)) return 'vod';
-  // Fail closed: EXTINF without ENDLIST is not enough — ended or truncated
-  // playlists often omit ENDLIST and would otherwise green-pass live-video:check.
-  // Require an explicit live marker (playlist type or program-date-time).
-  if (/#EXT-X-PLAYLIST-TYPE:(?:EVENT|LIVE)/.test(text)) return 'live';
-  if (/#EXTINF/.test(text) && /#EXT-X-PROGRAM-DATE-TIME/.test(text)) return 'live';
-  return 'unknown';
+const HLS_DEFAULT_TARGET_SECONDS = 6;
+const HLS_MAX_RELOAD_WAIT_SECONDS = 10;
+
+function playlistLines(text) {
+  return text.trimStart().split(/\r?\n/).map((line) => line.trim());
+}
+
+/** Value of the first line that is exactly `tag` plus a value in `format`; tags match whole lines, never substrings. */
+function tagValue(lines, tag, format) {
+  const value = lines.find((line) => line.startsWith(tag))?.slice(tag.length);
+  return value !== undefined && format.test(value) ? value : null;
+}
+
+/**
+ * One fetch of a media playlist. ENDLIST or PLAYLIST-TYPE:VOD has ended. Anything else with segments is
+ * only a live candidate: a frozen or ended-without-ENDLIST playlist looks the same, PROGRAM-DATE-TIME
+ * included, until a reload shows whether it advanced.
+ */
+function readHlsPlaylist(text) {
+  const lines = playlistLines(text);
+  if (lines[0] !== '#EXTM3U') return { kind: 'invalid', detail: 'not an HLS playlist (no #EXTM3U header)' };
+  if (lines.some((line) => line.startsWith('#EXT-X-STREAM-INF:'))) return { kind: 'invalid', detail: 'master playlist lists no variant URI' };
+  if (lines.includes('#EXT-X-ENDLIST') || lines.includes('#EXT-X-PLAYLIST-TYPE:VOD')) return { kind: 'ended' };
+  const segmentCount = lines.filter((line) => line.startsWith('#EXTINF:')).length;
+  if (!segmentCount) return { kind: 'invalid', detail: 'media playlist has no segments' };
+  return {
+    kind: 'live-candidate',
+    mediaSequence: Number(tagValue(lines, '#EXT-X-MEDIA-SEQUENCE:', /^\d+$/) ?? 0),
+    targetSeconds: Number(tagValue(lines, '#EXT-X-TARGETDURATION:', /^\d+(?:\.\d+)?$/) ?? HLS_DEFAULT_TARGET_SECONDS),
+    segmentCount,
+    // Token-signing CDNs rewrite the query on every request, so only the path marks a new segment.
+    lastSegment: lines.findLast((line) => line && !line.startsWith('#'))?.split(/[?#]/, 1)[0],
+  };
+}
+
+/** A live playlist slides forward (EXT-X-MEDIA-SEQUENCE, last segment) or grows (EVENT) between reloads. */
+function playlistAdvanced(before, after) {
+  return after.mediaSequence > before.mediaSequence
+    || after.lastSegment !== before.lastSegment
+    || after.segmentCount > before.segmentCount;
 }
 
 function firstVariantUri(text) {
-  const lines = text.split(/\r?\n/).map((line) => line.trim());
-  const streamInf = lines.findIndex((line) => line.startsWith('#EXT-X-STREAM-INF'));
+  const lines = playlistLines(text);
+  const streamInf = lines.findIndex((line) => line.startsWith('#EXT-X-STREAM-INF:'));
   if (streamInf < 0) return null;
   return lines.slice(streamInf + 1).find((line) => line && !line.startsWith('#')) ?? null;
 }
 
-async function probeHlsCandidate(candidate) {
-  const startedAt = Date.now();
-  const observe = (fields) => classifyAttempt({ transport: 'hls', elapsedMs: Date.now() - startedAt, manifest: 'unknown', failure: null, ...fields });
+/** Resolves after `ms`, or rejects with the signal's reason (the probe's TimeoutError) when it aborts first. */
+function abortableDelay(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(signal.reason);
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+export async function probeHlsCandidate(candidate, { fetch: fetchPlaylist = (...args) => globalThis.fetch(...args), delay = abortableDelay, now = Date.now } = {}) {
+  const startedAt = now();
+  const observe = (fields) => classifyAttempt({ transport: 'hls', elapsedMs: now() - startedAt, manifest: 'unknown', failure: null, ...fields });
+  const fatal = (detail) => ({ verdict: observe({ failure: { kind: 'fatal', detail } }) });
+  const settle = (playlist) => (playlist.kind === 'ended' ? { verdict: observe({ manifest: 'vod' }) } : fatal(playlist.detail));
   const signal = AbortSignal.timeout(LIVE_VIDEO_TIMING.verdictDeadlineMs);
+  const get = (url) => fetchPlaylist(url, { signal, headers: { 'user-agent': BROWSER_UA } });
   try {
     let url = candidate.url;
     for (let depth = 0; depth < 3; depth++) {
-      const response = await fetch(url, { signal, headers: { 'user-agent': BROWSER_UA } });
+      const response = await get(url);
       if (!response.ok) return { verdict: observe({ failure: { kind: 'http', status: response.status } }) };
       const text = await response.text();
       const variant = firstVariantUri(text);
@@ -311,18 +364,28 @@ async function probeHlsCandidate(candidate) {
         url = new URL(variant, response.url || url).href;
         continue;
       }
-      const manifest = classifyHlsPlaylist(text);
-      return { verdict: observe(manifest === 'unknown' ? { failure: { kind: 'fatal', detail: 'not an HLS media playlist' } } : { manifest }) };
+      const before = readHlsPlaylist(text);
+      if (before.kind !== 'live-candidate') return settle(before);
+      // Reload after one target duration, never past the probe deadline, and require progress.
+      const targetMs = Math.min(Math.max(before.targetSeconds, 1), HLS_MAX_RELOAD_WAIT_SECONDS) * 1000;
+      const waitMs = Math.max(0, Math.min(targetMs, LIVE_VIDEO_TIMING.verdictDeadlineMs - (now() - startedAt)));
+      await delay(waitMs, signal);
+      const reload = await get(response.url || url);
+      if (!reload.ok) return { verdict: observe({ failure: { kind: 'http', status: reload.status } }) };
+      const after = readHlsPlaylist(await reload.text());
+      if (after.kind !== 'live-candidate') return settle(after);
+      if (!playlistAdvanced(before, after)) return fatal(`media playlist did not advance in ${formatSeconds(waitMs / 1000)}`);
+      return { verdict: observe({ manifest: 'live' }) };
     }
-    return { verdict: observe({ failure: { kind: 'fatal', detail: 'too many nested playlists' } }) };
+    return fatal('too many nested playlists');
   } catch (error) {
     if (error?.name === 'TimeoutError') return { verdict: observe({ elapsedMs: LIVE_VIDEO_TIMING.verdictDeadlineMs }) };
-    return { verdict: observe({ failure: { kind: 'fatal', detail: error?.cause?.code ?? error?.message ?? String(error) } }) };
+    return fatal(error?.cause?.code ?? error?.message ?? String(error));
   }
 }
 
 async function probeHlsCandidates(candidates) {
-  return Promise.all(candidates.map(probeHlsCandidate));
+  return Promise.all(candidates.map((candidate) => probeHlsCandidate(candidate)));
 }
 
 export async function runCheck(argv, { write = console.log, probeYouTube = probeYouTubeWithBrowser, probeHls = probeHlsCandidates } = {}) {

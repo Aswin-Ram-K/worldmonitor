@@ -294,9 +294,6 @@ const DIRECT_HLS_MAP: Readonly<Record<string, string>> = {
   'press-tv': 'https://cdnlive.presstv.ir/cdnlive/smil:cdnlive.smil/playlist.m3u8',
 };
 
-interface ProxiedHlsEntry { url: string; referer: string; }
-const PROXIED_HLS_MAP: Readonly<Record<string, ProxiedHlsEntry>> = {};
-
 if (import.meta.env.DEV) {
   const allChannels = [...FULL_LIVE_CHANNELS, ...TECH_LIVE_CHANNELS, ...OPTIONAL_LIVE_CHANNELS];
   for (const id of Object.keys(DIRECT_HLS_MAP)) {
@@ -615,15 +612,6 @@ export class LiveNewsPanel extends Panel {
     const failedAt = this.hlsFailureCooldown.get(channelId);
     if (failedAt && Date.now() - failedAt < this.HLS_COOLDOWN_MS) return undefined;
     return url;
-  }
-
-  private getProxiedHlsUrl(channelId: string): string | undefined {
-    if (!isDesktopRuntime()) return undefined;
-    const entry = PROXIED_HLS_MAP[channelId];
-    if (!entry) return undefined;
-    const failedAt = this.hlsFailureCooldown.get(channelId);
-    if (failedAt && Date.now() - failedAt < this.HLS_COOLDOWN_MS) return undefined;
-    return `http://127.0.0.1:${getLocalApiPort()}/api/hls-proxy?url=${encodeURIComponent(entry.url)}`;
   }
 
   private get embedOrigin(): string {
@@ -1052,7 +1040,7 @@ export class LiveNewsPanel extends Panel {
   private async resolveChannelVideo(channel: LiveChannel, forceFallback = false): Promise<void> {
     const useFallbackVideo = channel.useFallbackOnly || forceFallback;
 
-    if (this.getDirectHlsUrl(channel.id) || this.getProxiedHlsUrl(channel.id) || channel.hlsUrl) {
+    if (this.getDirectHlsUrl(channel.id) || channel.hlsUrl) {
       channel.videoId = channel.fallbackVideoId;
       channel.isLive = true;
       return;
@@ -1312,7 +1300,7 @@ export class LiveNewsPanel extends Panel {
   }
 
   private async renderNativeHlsPlayer(): Promise<void> {
-    const hlsUrl = this.getDirectHlsUrl(this.activeChannel.id) || this.getProxiedHlsUrl(this.activeChannel.id) || this.activeChannel.hlsUrl;
+    const hlsUrl = this.getDirectHlsUrl(this.activeChannel.id) || this.activeChannel.hlsUrl;
     if (!hlsUrl || !(hlsUrl.startsWith('https://') || hlsUrl.startsWith('http://127.0.0.1'))) return;
     const sessionToken = this.liveMediaSessionToken;
 
@@ -1487,7 +1475,7 @@ export class LiveNewsPanel extends Panel {
     if (!this.element?.isConnected) return;
     if (!this.ownsLiveMediaSession(channelId, sessionToken)) return;
 
-    if (this.getDirectHlsUrl(this.activeChannel.id) || this.getProxiedHlsUrl(this.activeChannel.id) || this.activeChannel.hlsUrl) {
+    if (this.getDirectHlsUrl(this.activeChannel.id) || this.activeChannel.hlsUrl) {
       void this.renderNativeHlsPlayer();
       return;
     }

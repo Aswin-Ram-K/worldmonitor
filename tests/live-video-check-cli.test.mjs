@@ -2,11 +2,11 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import {
-  classifyHlsPlaylist,
   exitCodeFor,
   formatCheckLine,
   observationFromRecord,
   parseCheckArgs,
+  probeHlsCandidate,
   probeYouTubeCandidates,
   runCheck,
 } from '../scripts/check-live-video-sources.mjs';
@@ -204,21 +204,131 @@ describe('probeYouTubeCandidates', () => {
   });
 });
 
-describe('classifyHlsPlaylist', () => {
-  it('reads live, VOD and non-playlist bodies', () => {
-    // EXTINF alone is not live — ended playlists often omit ENDLIST.
-    assert.equal(classifyHlsPlaylist('#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:6.0,\nseg1.ts\n'), 'unknown');
-    assert.equal(
-      classifyHlsPlaylist('#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\n#EXTINF:6.0,\nseg1.ts\n'),
-      'live',
-    );
-    assert.equal(
-      classifyHlsPlaylist('#EXTM3U\n#EXT-X-PROGRAM-DATE-TIME:2026-01-01T00:00:00.000Z\n#EXTINF:6.0,\nseg1.ts\n'),
-      'live',
-    );
-    assert.equal(classifyHlsPlaylist('#EXTM3U\n#EXTINF:6.0,\nseg1.ts\n#EXT-X-ENDLIST\n'), 'vod');
-    assert.equal(classifyHlsPlaylist('#EXTM3U\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXTINF:6.0,\nseg1.ts\n'), 'vod');
-    assert.equal(classifyHlsPlaylist('<html>blocked</html>'), 'unknown');
+describe('probeHlsCandidate', () => {
+  const MEDIA_URL = 'https://cdn.example.com/live/index.m3u8';
+  const hls = (url = MEDIA_URL) => parsed(url).candidate;
+  const playlist = (...lines) => `#EXTM3U\n${lines.join('\n')}\n`;
+  const segments = (first, count, name = (n) => `seg${n}.ts`) =>
+    Array.from({ length: count }, (_, i) => `#EXTINF:6.0,\n${name(first + i)}`).join('\n');
+
+  /** Serves each URL's bodies in order (the last one repeats), records requests and waits, never sleeps. */
+  function playlistServer(routes) {
+    const requests = [];
+    const delays = [];
+    return {
+      requests,
+      delays,
+      fetch: async (url, init) => {
+        requests.push({ url, init });
+        const bodies = routes[url] ?? [];
+        const body = bodies[Math.min(requests.filter((request) => request.url === url).length, bodies.length) - 1];
+        if (body === undefined) return { ok: false, status: 404, url, text: async () => '' };
+        return { ok: true, status: 200, url, text: async () => body };
+      },
+      delay: async (ms, signal) => {
+        assert.equal(signal, requests[0].init.signal, 'the wait honours the probe deadline signal');
+        delays.push(ms);
+      },
+    };
+  }
+
+  it('reads a frozen playlist as not live, even with PROGRAM-DATE-TIME or PLAYLIST-TYPE:EVENT', async () => {
+    const frozenBodies = [
+      playlist('#EXT-X-TARGETDURATION:6', '#EXT-X-MEDIA-SEQUENCE:120', '#EXT-X-PROGRAM-DATE-TIME:2026-01-01T00:00:00.000Z', segments(120, 3)),
+      playlist('#EXT-X-PLAYLIST-TYPE:EVENT', '#EXT-X-TARGETDURATION:6', segments(0, 3)),
+    ];
+    for (const frozen of frozenBodies) {
+      const server = playlistServer({ [MEDIA_URL]: [frozen] });
+      const { verdict } = await probeHlsCandidate(hls(), server);
+      assert.equal(verdict.verdict, 'failed');
+      assert.equal(verdict.outcome.kind, 'hls-fatal');
+      assert.match(verdict.outcome.detail, /^media playlist did not advance in 6 s$/);
+      assert.deepEqual(server.requests.map((request) => request.url), [MEDIA_URL, MEDIA_URL]);
+      assert.deepEqual(server.delays, [6_000]);
+    }
+  });
+
+  it('reads a frozen playlist as not live when its CDN rotates a segment URL token on every request', async () => {
+    const tokened = (token) => playlist('#EXT-X-TARGETDURATION:6', '#EXT-X-MEDIA-SEQUENCE:120', segments(120, 3, (n) => `seg${n}.ts?token=${token}`));
+    const server = playlistServer({ [MEDIA_URL]: [tokened('a1'), tokened('b2')] });
+    const { verdict } = await probeHlsCandidate(hls(), server);
+    assert.equal(verdict.verdict, 'failed');
+    assert.match(verdict.outcome.detail, /^media playlist did not advance in 6 s$/);
+  });
+
+  it('reads a playlist without PROGRAM-DATE-TIME as live once its media sequence advances', async () => {
+    const wowza = (sequence) => playlist('#EXT-X-VERSION:3', '#EXT-X-TARGETDURATION:4', `#EXT-X-MEDIA-SEQUENCE:${sequence}`, segments(sequence, 3, (n) => `media_w1052_${n}.ts`));
+    const server = playlistServer({ [MEDIA_URL]: [wowza(43770), wowza(43794)] });
+    const { verdict } = await probeHlsCandidate(hls(), server);
+    assert.deepEqual(verdict, { verdict: 'live', video: null });
+    assert.deepEqual(server.delays, [4_000]);
+  });
+
+  it('reads an EVENT playlist as live when it grows', async () => {
+    const event = (count) => playlist('#EXT-X-PLAYLIST-TYPE:EVENT', '#EXT-X-TARGETDURATION:6', '#EXT-X-MEDIA-SEQUENCE:0', segments(0, count));
+    const server = playlistServer({ [MEDIA_URL]: [event(2), event(3)] });
+    assert.deepEqual((await probeHlsCandidate(hls(), server)).verdict, { verdict: 'live', video: null });
+  });
+
+  it('reads ENDLIST and VOD playlists as recordings from one fetch', async () => {
+    for (const ended of [playlist('#EXT-X-TARGETDURATION:6', segments(0, 2), '#EXT-X-ENDLIST'), playlist('#EXT-X-PLAYLIST-TYPE:VOD', segments(0, 2))]) {
+      const server = playlistServer({ [MEDIA_URL]: [ended] });
+      assert.deepEqual((await probeHlsCandidate(hls(), server)).verdict, { verdict: 'recording', video: null });
+      assert.equal(server.requests.length, 1);
+      assert.deepEqual(server.delays, []);
+    }
+  });
+
+  it('matches HLS tags as whole lines', async () => {
+    const nearLive = playlist('#EXT-X-PLAYLIST-TYPE:EVENTUAL', '#EXT-X-PROGRAM-DATE-TIMEX:2026-09-15T00:00:00.000Z', '#EXT-X-TARGETDURATION:6', segments(0, 2));
+    const frozen = await probeHlsCandidate(hls(), playlistServer({ [MEDIA_URL]: [nearLive] }));
+    assert.equal(frozen.verdict.verdict, 'failed');
+    assert.match(frozen.verdict.outcome.detail, /did not advance/);
+
+    const nearEnded = (first) => playlist('#EXT-X-PLAYLIST-TYPE:VODX', '#EXT-X-TARGETDURATION:6', `#EXT-X-MEDIA-SEQUENCE:${first}`, segments(first, 2), '#EXT-X-ENDLISTX');
+    const advancing = await probeHlsCandidate(hls(), playlistServer({ [MEDIA_URL]: [nearEnded(0), nearEnded(1)] }));
+    assert.deepEqual(advancing.verdict, { verdict: 'live', video: null });
+  });
+
+  it('follows the first variant of a master playlist and reloads that variant', async () => {
+    const master = 'https://cdn.example.com/live/master.m3u8';
+    const variant = 'https://cdn.example.com/live/low/index.m3u8';
+    const media = (sequence) => playlist('#EXT-X-TARGETDURATION:6', `#EXT-X-MEDIA-SEQUENCE:${sequence}`, segments(sequence, 3));
+    const server = playlistServer({
+      [master]: [playlist('#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360', 'low/index.m3u8', '#EXT-X-STREAM-INF:BANDWIDTH=2400000', 'high/index.m3u8')],
+      [variant]: [media(10), media(11)],
+    });
+    assert.deepEqual((await probeHlsCandidate(hls(master), server)).verdict, { verdict: 'live', video: null });
+    assert.deepEqual(server.requests.map((request) => request.url), [master, variant, variant]);
+    for (const request of server.requests) assert.match(request.init.headers['user-agent'], /^Mozilla\//);
+  });
+
+  it('names what is wrong with a body that cannot be live', async () => {
+    const detail = async (body) => (await probeHlsCandidate(hls(), playlistServer({ [MEDIA_URL]: [body] }))).verdict.outcome.detail;
+    assert.match(await detail('<html>blocked</html>'), /^not an HLS playlist/);
+    assert.match(await detail(playlist('#EXT-X-STREAM-INF:BANDWIDTH=800000')), /^master playlist lists no variant/);
+    assert.match(await detail(playlist('#EXT-X-TARGETDURATION:6')), /^media playlist has no segments/);
+  });
+
+  it('waits one target duration, clamped to 1-10 s and to the time left before the deadline', async () => {
+    const frozen = (...tags) => playlist(...tags, '#EXT-X-MEDIA-SEQUENCE:5', segments(5, 2));
+    const waitFor = async (body, fetchMs) => {
+      const server = playlistServer({ [MEDIA_URL]: [body] });
+      let clock = 0;
+      await probeHlsCandidate(hls(), {
+        ...server,
+        now: () => clock,
+        fetch: async (url, init) => {
+          clock += fetchMs;
+          return server.fetch(url, init);
+        },
+      });
+      return server.delays;
+    };
+    assert.deepEqual(await waitFor(frozen('#EXT-X-TARGETDURATION:30'), 1_000), [10_000]);
+    assert.deepEqual(await waitFor(frozen('#EXT-X-TARGETDURATION:0'), 1_000), [1_000]);
+    assert.deepEqual(await waitFor(frozen(), 1_000), [6_000]);
+    assert.deepEqual(await waitFor(frozen('#EXT-X-TARGETDURATION:6'), 12_000), [LIVE_VIDEO_TIMING.verdictDeadlineMs - 12_000]);
   });
 });
 
