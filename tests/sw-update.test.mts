@@ -50,7 +50,7 @@ interface FakeEnv {
     body: {
       appendChild(el: FakeElement): void;
       contains(el: FakeElement | null): boolean;
-    };
+    } | null;
     addEventListener(type: string, cb: () => void): void;
     removeEventListener(type: string, cb: () => void): void;
   };
@@ -252,6 +252,16 @@ describe('installSwUpdateHandler', () => {
     install(env);
     env.swContainer.fireControllerChange();
     assert.equal(env.appendedToasts.length, 1);
+  });
+
+  // --- null document.body (WORLDMONITOR-12J) ----------------------------------
+
+  it('does not throw when controllerchange fires while document.body is null', () => {
+    env.swContainer._controller = {};
+    install(env);
+    env.doc.body = null;
+    assert.doesNotThrow(() => env.swContainer.fireControllerChange());
+    assert.equal(env.appendedToasts.length, 0, 'no toast appended without a body');
   });
 
   // --- reload button ----------------------------------------------------------
