@@ -4930,7 +4930,10 @@ export class DataLoaderManager implements AppModule {
       const result = await fetchSecurityAdvisories();
       this.callPanel('security-advisories', 'setData', result.advisories);
       this.ctx.intelligenceCache.advisories = result.advisories;
-      if (!result.ok) this.callPanel('security-advisories', 'showError');
+      if (!result.ok) {
+        if (result.advisories.length > 0) this.callPanel('security-advisories', 'setErrorState', true);
+        else this.callPanel('security-advisories', 'showError');
+      }
     } catch (error) {
       console.error('[App] Security advisories fetch failed:', error);
       this.callPanel('security-advisories', 'showError');

@@ -776,8 +776,10 @@ callerTest('availability callers clear expired advisories and expose failure unt
   await expect(page.locator('.sa-title')).toHaveText('Controlled travel advisory');
   await page.clock.setSystemTime(new Date('2026-09-15T12:16:00Z'));
   await page.getByRole('button', { name: 'Fetch error fixture', exact: true }).click();
-  await expect(page.locator('.panel-error-state')).toBeVisible();
+  await expect(page.locator('.sa-title')).toHaveText('Controlled travel advisory');
+  await expect(page.locator('.panel-header')).toHaveClass(/panel-header-error/);
   await expect(page.locator('body')).toHaveAttribute('data-advisory-count', '1');
+  await page.screenshot({ path: testInfo.outputPath('advisories-retained-error.png'), animations: 'disabled' });
   await page.clock.setSystemTime(new Date('2026-09-15T13:01:00Z'));
   await page.getByRole('button', { name: 'Fetch error fixture', exact: true }).click();
   await expect(page.locator('body')).toHaveAttribute('data-advisory-count', '0');
