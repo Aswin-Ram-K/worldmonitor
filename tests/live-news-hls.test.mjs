@@ -108,6 +108,11 @@ describe('channel data integrity', () => {
     }
   });
 
+  it('does not ship CNBC, whose only YouTube live stream is a documentary marathon', () => {
+    assert.ok(!allChannelIds.has('cnbc'), 'cnbc must not be a built-in Live News channel');
+    assert.doesNotMatch(liveNewsSrc, /'cnbc'/, 'no region list, HLS map or proxy entry may still name cnbc');
+  });
+
   it('no two webcam feeds play the same video', () => {
     const ids = [...liveWebcamsSrc.matchAll(/fallbackVideoId:\s*'([^']+)'/g)].map((m) => m[1]);
     assert.ok(ids.length > 0, 'no webcam fallbackVideoId found');
