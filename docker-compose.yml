@@ -29,6 +29,8 @@ services:
       LOCAL_API_CLOUD_FALLBACK: "false"
       WM_TRUSTED_PROXY_CIDRS: "${WM_TRUSTED_PROXY_CIDRS:-}"
       WS_RELAY_URL: "http://ais-relay:3004"
+      # Operator keys accepted by MCP and REST through X-WorldMonitor-Key.
+      WORLDMONITOR_VALID_KEYS: "${WORLDMONITOR_VALID_KEYS:-}"
       RELAY_SHARED_SECRET: "${RELAY_SHARED_SECRET:?RELAY_SHARED_SECRET required — generate with: openssl rand -hex 32}"
       WORLDMONITOR_RELAY_KEY: "${WORLDMONITOR_RELAY_KEY:-}"
       # LLM provider (any OpenAI-compatible endpoint)
