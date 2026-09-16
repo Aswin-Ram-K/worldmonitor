@@ -6,7 +6,8 @@
 import { MapboxOverlay } from '@deck.gl/mapbox';
 import type { Layer, LayersList, PickingInfo } from '@deck.gl/core';
 import { GeoJsonLayer, ScatterplotLayer, PathLayer, IconLayer, TextLayer, PolygonLayer } from '@deck.gl/layers';
-import maplibregl from 'maplibre-gl';
+import * as maplibregl from 'maplibre-gl';
+import maplibreWorkerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url';
 import type { StyleSpecification } from 'maplibre-gl';
 import { FALLBACK_DARK_STYLE, FALLBACK_LIGHT_STYLE, getMapProvider, getMapTheme, isLightMapTheme } from '@/config/basemap';
 import { getStyleForProvider } from '@/config/basemap-styles';
@@ -517,6 +518,12 @@ function stableTradeRoutePhase(routeId: string): number {
 // interleaved-mode render race is installed exactly once even if a hot-reload
 // or recreateWithFallback rebuilds the map.
 let __deckInterleavedRaceFilterInstalled = false;
+
+// deck.gl 9.x still reads map.transform for interleaved projection/terrain.
+// Remove this bridge when @deck.gl/mapbox supports MapLibre 6's camera API.
+class DeckCompatibleMap extends maplibregl.Map {
+  get transform() { return this._camera.transform; }
+}
 
 const DECK_INTERLEAVED_RACE_MESSAGE_RE = /Cannot read properties of null \(reading 'id'\)|null is not an object \(evaluating '[\w.]+\.id'\)/;
 const DECK_INTERLEAVED_RACE_SOURCE_RE = /(?:^|[/(])deck-stack-[A-Za-z0-9_-]+\.js/;
@@ -1075,6 +1082,7 @@ export class DeckGLMap {
   }
 
   private async initMapLibre(): Promise<void> {
+    maplibregl.setWorkerUrl(maplibreWorkerUrl);
     if (maplibregl.getRTLTextPluginStatus() === 'unavailable') {
       maplibregl.setRTLTextPlugin(
         '/mapbox-gl-rtl-text.min.js',
@@ -1099,7 +1107,7 @@ export class DeckGLMap {
     const basemapEl = document.getElementById('deckgl-basemap');
     if (!basemapEl) return;
 
-    this.maplibreMap = new maplibregl.Map({
+    this.maplibreMap = new DeckCompatibleMap({
       container: basemapEl,
       style: primaryStyle,
       center: [preset.longitude, preset.latitude],
@@ -1133,7 +1141,7 @@ export class DeckGLMap {
       this.maplibreMap?.remove();
       const fallbackEl = document.getElementById('deckgl-basemap');
       if (!fallbackEl) return;
-      this.maplibreMap = new maplibregl.Map({
+      this.maplibreMap = new DeckCompatibleMap({
         container: fallbackEl,
         style: fallback,
         center: [preset.longitude, preset.latitude],
@@ -1172,7 +1180,7 @@ export class DeckGLMap {
     let tileLoadOk = false;
     let tileErrorCount = 0;
 
-    this.maplibreMap.on('error', (e: { error?: Error; message?: string }) => {
+    this.maplibreMap.on('error', (e: { error?: { message?: string }; message?: string }) => {
       const msg = e.error?.message ?? e.message ?? '';
       console.warn('[DeckGLMap] map error:', msg);
       if (msg.includes('Failed to fetch') || msg.includes('AJAXError') || msg.includes('CORS') || msg.includes('NetworkError') || msg.includes('403') || msg.includes('Forbidden')) {
@@ -8159,7 +8167,7 @@ export class DeckGLMap {
       if (timeoutId) { clearTimeout(timeoutId); timeoutId = null; }
     };
 
-    const onError = (e: { error?: Error; message?: string }) => {
+    const onError = (e: { error?: { message?: string }; message?: string }) => {
       if (gen !== this.tileMonitorGeneration) { cleanup(); return; }
       const msg = e.error?.message ?? e.message ?? '';
       if (msg.includes('Failed to fetch') || msg.includes('AJAXError') || msg.includes('CORS') || msg.includes('NetworkError') || msg.includes('403') || msg.includes('Forbidden')) {
