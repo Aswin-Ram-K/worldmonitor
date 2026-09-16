@@ -621,7 +621,6 @@
     },
     "fsi": {
       "infoTooltip": "<strong>Financial Stress Indicator</strong> A market-stress ratio derived from HYG and TLT prices, VIX, and the high-yield spread. Higher values indicate lower stress; lower values indicate higher stress.",
-      "methodologyTooltip": "<strong>Financial Stress Indicator</strong> A market-stress ratio derived from HYG and TLT prices, VIX, and the high-yield spread. Higher values indicate lower stress; lower values indicate higher stress.",
       "title": "Financial Stress Indicator"
     },
     "fuelPrices": {
