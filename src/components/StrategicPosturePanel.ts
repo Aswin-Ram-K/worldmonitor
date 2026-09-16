@@ -165,8 +165,10 @@ export class StrategicPosturePanel extends Panel {
       this.updateBadges();
       this.render();
 
-      // If we rendered stale localStorage data, re-fetch fresh after a short delay
-      if (this.isStale) {
+      // Make one recovery attempt for retained data. A non-cacheable response
+      // can preserve the stale breaker entry, so rescheduling forced attempts
+      // here would otherwise poll an unavailable source indefinitely.
+      if (this.isStale && !forceRefresh) {
         setTimeout(() => {
           void this.fetchAndRender(true);
         }, 3000);
