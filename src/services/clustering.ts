@@ -212,6 +212,7 @@ function mergeSemanticallySimilarClusters(
       lastUpdated,
       isAlert: allItems.some(i => i.isAlert),
       monitorColor: allItems.find(item => item.monitorColor)?.monitorColor,
+      velocity: primary.velocity,
       threat: aggregateThreats(allItems),
       lang: primary.lang,
       ...(Number.isFinite(primary.credibilityScore) ? { credibilityScore: primary.credibilityScore } : {}),
