@@ -327,6 +327,19 @@ function firstVariantUri(text) {
   return lines.slice(streamInf + 1).find((line) => line && !line.startsWith('#')) ?? null;
 }
 
+const HLS_NOT_HTTPS = 'the manifest must be an https URL';
+const HLS_MAX_REDIRECTS = 5;
+
+/** Same https gate as `parseSourceEntry`, applied to every resolved variant and redirect hop. */
+function httpsHref(raw, base) {
+  try {
+    const parsed = new URL(raw, base);
+    return parsed.protocol === 'https:' ? parsed.href : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Resolves after `ms`, or rejects with the signal's reason (the probe's TimeoutError) when it aborts first. */
 function abortableDelay(ms, signal) {
   return new Promise((resolve, reject) => {
@@ -352,16 +365,42 @@ export async function probeHlsCandidate(candidate, { fetch: fetchPlaylist = (...
   const fatal = (detail) => ({ verdict: observe({ failure: { kind: 'fatal', detail } }) });
   const settle = (playlist) => (playlist.kind === 'ended' ? { verdict: observe({ manifest: 'vod' }) } : fatal(playlist.detail));
   const signal = AbortSignal.timeout(LIVE_VIDEO_TIMING.verdictDeadlineMs);
-  const get = (url) => fetchPlaylist(url, { signal, headers: { 'user-agent': BROWSER_UA } });
+  const get = async (url) => {
+    let current = url;
+    for (let hop = 0; hop < HLS_MAX_REDIRECTS; hop++) {
+      const httpsUrl = httpsHref(current);
+      if (!httpsUrl) return { error: HLS_NOT_HTTPS };
+      const response = await fetchPlaylist(httpsUrl, {
+        signal,
+        headers: { 'user-agent': BROWSER_UA },
+        redirect: 'manual',
+      });
+      if (response.status >= 300 && response.status < 400) {
+        const location = response.headers?.get?.('location');
+        if (!location) return { error: 'redirect missing Location' };
+        const next = httpsHref(location, response.url || httpsUrl);
+        if (!next) return { error: HLS_NOT_HTTPS };
+        current = next;
+        continue;
+      }
+      if (response.url && !httpsHref(response.url)) return { error: HLS_NOT_HTTPS };
+      return { response };
+    }
+    return { error: 'too many redirects' };
+  };
   try {
     let url = candidate.url;
     for (let depth = 0; depth < 3; depth++) {
-      const response = await get(url);
+      const fetched = await get(url);
+      if (fetched.error) return fatal(fetched.error);
+      const response = fetched.response;
       if (!response.ok) return { verdict: observe({ failure: { kind: 'http', status: response.status } }) };
       const text = await response.text();
       const variant = firstVariantUri(text);
       if (variant) {
-        url = new URL(variant, response.url || url).href;
+        const next = httpsHref(variant, response.url || url);
+        if (!next) return fatal(HLS_NOT_HTTPS);
+        url = next;
         continue;
       }
       const before = readHlsPlaylist(text);
@@ -370,7 +409,9 @@ export async function probeHlsCandidate(candidate, { fetch: fetchPlaylist = (...
       const targetMs = Math.min(Math.max(before.targetSeconds, 1), HLS_MAX_RELOAD_WAIT_SECONDS) * 1000;
       const waitMs = Math.max(0, Math.min(targetMs, LIVE_VIDEO_TIMING.verdictDeadlineMs - (now() - startedAt)));
       await delay(waitMs, signal);
-      const reload = await get(response.url || url);
+      const reloadFetched = await get(response.url || url);
+      if (reloadFetched.error) return fatal(reloadFetched.error);
+      const reload = reloadFetched.response;
       if (!reload.ok) return { verdict: observe({ failure: { kind: 'http', status: reload.status } }) };
       const after = readHlsPlaylist(await reload.text());
       if (after.kind !== 'live-candidate') return settle(after);

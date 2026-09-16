@@ -300,7 +300,83 @@ describe('probeHlsCandidate', () => {
     });
     assert.deepEqual((await probeHlsCandidate(hls(master), server)).verdict, { verdict: 'live', video: null });
     assert.deepEqual(server.requests.map((request) => request.url), [master, variant, variant]);
-    for (const request of server.requests) assert.match(request.init.headers['user-agent'], /^Mozilla\//);
+    for (const request of server.requests) {
+      assert.match(request.init.headers['user-agent'], /^Mozilla\//);
+      assert.equal(request.init.redirect, 'manual');
+    }
+  });
+
+  it('rejects an HTTP variant without fetching it', async () => {
+    const master = 'https://cdn.example.com/live/master.m3u8';
+    const httpVariant = 'http://cdn.example.com/live/low/index.m3u8';
+    const requests = [];
+    const { verdict } = await probeHlsCandidate(hls(master), {
+      fetch: async (url, init) => {
+        requests.push(url);
+        assert.equal(init.redirect, 'manual');
+        return {
+          ok: true,
+          status: 200,
+          url,
+          text: async () => playlist('#EXT-X-STREAM-INF:BANDWIDTH=800000', httpVariant),
+        };
+      },
+    });
+    assert.equal(verdict.verdict, 'failed');
+    assert.equal(verdict.outcome.kind, 'hls-fatal');
+    assert.match(verdict.outcome.detail, /https/);
+    assert.deepEqual(requests, [master]);
+  });
+
+  it('rejects an HTTPS-to-HTTP redirect without fetching the HTTP URL', async () => {
+    const httpsUrl = MEDIA_URL;
+    const httpUrl = 'http://cdn.example.com/live/index.m3u8';
+    const requests = [];
+    const { verdict } = await probeHlsCandidate(hls(httpsUrl), {
+      fetch: async (url, init) => {
+        requests.push(url);
+        assert.equal(init.redirect, 'manual');
+        return {
+          ok: false,
+          status: 302,
+          url,
+          headers: { get: (name) => (name.toLowerCase() === 'location' ? httpUrl : null) },
+          text: async () => '',
+        };
+      },
+    });
+    assert.equal(verdict.verdict, 'failed');
+    assert.equal(verdict.outcome.kind, 'hls-fatal');
+    assert.match(verdict.outcome.detail, /https/);
+    assert.deepEqual(requests, [httpsUrl]);
+  });
+
+  it('follows an HTTPS redirect and reloads the final playlist', async () => {
+    const front = 'https://cdn.example.com/live/front.m3u8';
+    const dest = MEDIA_URL;
+    const media = (sequence) => playlist('#EXT-X-TARGETDURATION:6', `#EXT-X-MEDIA-SEQUENCE:${sequence}`, segments(sequence, 3));
+    const requests = [];
+    const destBodies = [media(10), media(11)];
+    const { verdict } = await probeHlsCandidate(hls(front), {
+      fetch: async (url, init) => {
+        requests.push(url);
+        assert.equal(init.redirect, 'manual');
+        if (url === front) {
+          return {
+            ok: false,
+            status: 302,
+            url,
+            headers: { get: (name) => (name.toLowerCase() === 'location' ? dest : null) },
+            text: async () => '',
+          };
+        }
+        const body = destBodies[Math.min(requests.filter((seen) => seen === dest).length, destBodies.length) - 1];
+        return { ok: true, status: 200, url, text: async () => body };
+      },
+      delay: async () => {},
+    });
+    assert.deepEqual(verdict, { verdict: 'live', video: null });
+    assert.deepEqual(requests, [front, dest, dest]);
   });
 
   it('names what is wrong with a body that cannot be live', async () => {
