@@ -345,6 +345,16 @@ export const MARKETING_IGNORE_ERRORS: RegExp[] = [
   // `!hasFirstParty` gate for exactly that reason), so only the WebAuthn
   // wording — which no first-party call site can reach — is suppressed here.
   /^(?:Error: )?NotSupportedError: The user agent does not support public key credentials\.$/,
+  // The same WebAuthn surface failing one step earlier. WORLDMONITOR-12H is the
+  // shape: `NotSupportedError: Error connecting to Web Authentication service.`
+  // on Chrome 152 / macOS at `/pro`, via `onunhandledrejection` with zero
+  // frames, breadcrumbs ending at Clerk's `POST /v1/client/sign_ins` after
+  // clicks on its identifier field. Chromium raises it when the platform
+  // authenticator service cannot be reached, which only a WebAuthn CALLER can
+  // hit. The WebAuthn-free scan that licenses the entry above pins that this
+  // surface has none, so the caller is Clerk's sign-in UI. Anchored to the whole
+  // sentence for the same reason: bare `NotSupportedError` stays reportable.
+  /^(?:Error: )?NotSupportedError: Error connecting to Web Authentication service\.$/,
   // The same WebAuthn surface as the entry above, reached from the other
   // direction: a SECOND credential request issued while one is still
   // outstanding. WORLDMONITOR-11T is the shape: `Error: OperationError: A
