@@ -371,9 +371,11 @@ describe('startCheckout on desktop (#5911)', () => {
     resetHarness(true, { invokeRejects: true });
     const checkout = await loadCheckoutModule();
 
-    assert.equal(await checkout.startCheckout('pro_monthly', undefined, { fallbackToPricingPage: false }), false);
+    assert.equal(await checkout.startCheckout('pro_monthly'), false);
 
+    await new Promise(resolve => setTimeout(resolve, 0));
     const harness = globalThis.__desktopCheckoutHarness;
+    assert.equal(harness.invocations.length, 2, 'hosted checkout and default pricing fallback both attempted native launch');
     assert.deepEqual(harness.openedWindows, [], 'hosted checkout requires a native browser');
     assert.deepEqual(harness.toasts, [], 'must not claim a successful native launch');
     assert.equal(harness.errorToasts.length, 1);

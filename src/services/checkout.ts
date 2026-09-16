@@ -112,7 +112,7 @@ const APP_CHECKOUT_BASE_URL = `${WEB_APP_ORIGIN}/dashboard`;
  */
 function navigateToWebSurface(url: string): void {
   if (isDesktopRuntime()) {
-    void openExternalUrl(url);
+    void openExternalUrl(url, null, { desktopPopupFallback: false });
     return;
   }
   window.location.assign(url);
@@ -941,7 +941,7 @@ function renderCheckoutErrorSurface(
     // of replacing the app. The toast stays on desktop because, unlike the
     // web redirect, the app is still on screen to show it.
     if (isDesktopRuntime()) {
-      void openExternalUrl(proUrl);
+      void openExternalUrl(proUrl, null, { desktopPopupFallback: false });
       showCheckoutErrorToast(error.userMessage);
       return;
     }
