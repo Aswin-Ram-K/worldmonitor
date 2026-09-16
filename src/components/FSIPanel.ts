@@ -44,7 +44,7 @@ function fsiLabelDisplay(label: string): string {
   if (label === 'Low Stress') return t('components.fsi.labels.lowStress');
   if (label === 'Moderate Stress') return t('components.fsi.labels.moderateStress');
   if (label === 'Elevated Stress') return t('components.fsi.labels.elevatedStress');
-  if (label === 'Severe Stress') return t('components.fsi.labels.severeStress');
+  if (label === 'Severe Stress' || label === 'High Stress') return t('components.fsi.labels.severeStress');
   return label;
 }
 
