@@ -154,7 +154,13 @@ describe('hybrid clustering initial worker stage (#7782)', () => {
   });
 
   it('recomputes derived fields and preserves primary metadata when merging', async () => {
-    const first = cluster(1, { lat: 10, lon: 20, lang: 'en', credibilityScore: 0.9 });
+    const first = cluster(1, {
+      lat: 10,
+      lon: 20,
+      lang: 'en',
+      credibilityScore: 0.9,
+      velocity: { sourcesPerHour: 4, level: 'elevated', trend: 'rising', sentiment: 'negative', sentimentScore: -3 },
+    });
     const secondItem = item(2, 'Reuters');
     secondItem.lat = 10;
     secondItem.lon = 20;
@@ -167,7 +173,14 @@ describe('hybrid clustering initial worker stage (#7782)', () => {
 
     const merged = (await clusterNewsHybrid(Array.from({ length: 5 }, (_, index) => item(index))))
       .find(({ allItems }) => allItems.length === 2);
-    expect(merged).toMatchObject({ lat: 10, lon: 20, lang: 'en', credibilityScore: 0.9, monitorColor: 'red' });
+    expect(merged).toMatchObject({
+      lat: 10,
+      lon: 20,
+      lang: 'en',
+      credibilityScore: 0.9,
+      monitorColor: 'red',
+      velocity: { sourcesPerHour: 4, level: 'elevated', trend: 'rising', sentiment: 'negative', sentimentScore: -3 },
+    });
     expect(merged?.threat?.level).toBe('critical');
   });
 
