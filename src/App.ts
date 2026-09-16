@@ -3012,7 +3012,8 @@ export class App {
     const geometryReadyBeforeFanout = isCountryGeometryLoaded();
     if (!settled) {
       this.slowTierWaitTimedOut = true;
-      markLcpDebug('wm:data:initial-fanout-start');
+      // No fan-out mark here: the deferred runVisibleDataFanout() emits the paired
+      // start/complete, and a second start would read as a phantom fan-out.
       await this.dataLoader.loadAllData();
     } else {
       await this.runVisibleDataFanout();

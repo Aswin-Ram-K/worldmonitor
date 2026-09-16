@@ -7,6 +7,7 @@ import {
   observationFromRecord,
   parseCheckArgs,
   probeHlsCandidate,
+  probeYouTubeBatches,
   probeYouTubeCandidates,
   runCheck,
 } from '../scripts/check-live-video-sources.mjs';
@@ -204,6 +205,72 @@ describe('probeYouTubeCandidates', () => {
   });
 });
 
+describe('probeYouTubeBatches', () => {
+  const candidates = (count) => Array.from({ length: count }, (_, index) => parsed(`vid${String(index).padStart(8, '0')}`).candidate);
+  const liveFor = (batch) => batch.map((candidate) => ({ verdict: { verdict: 'live', video: { videoId: candidate.videoId } }, durationSeconds: null, verdictAtMs: null }));
+  const TIMED_OUT = { verdict: { verdict: 'failed', outcome: { kind: 'timeout' } }, durationSeconds: null, verdictAtMs: null };
+
+  /** Asserts the run covered every candidate in order, failing only the ones the stub never probed. */
+  function assertOnlySkippedFailed(results, entries, probed) {
+    const skipped = entries.filter((candidate) => !probed.includes(candidate));
+    assert.ok(skipped.length > 0, 'the failing batch must skip at least one candidate');
+    assert.equal(results.length, entries.length);
+    results.forEach((result, index) => {
+      if (skipped.includes(entries[index])) {
+        assert.deepEqual(result, TIMED_OUT);
+        return;
+      }
+      assert.equal(result.verdict.verdict, 'live');
+      assert.equal(result.verdict.video.videoId, entries[index].videoId);
+    });
+  }
+
+  it('keeps the other batches when a page fails to open', async () => {
+    const entries = candidates(20);
+    const probed = [];
+    const errors = [];
+    let opened = 0;
+    const results = await probeYouTubeBatches(entries, {
+      openPage: async () => {
+        opened += 1;
+        if (opened === 2) throw new Error('page crashed');
+        return { close: async () => {} };
+      },
+      probeBatch: async (batch) => {
+        probed.push(...batch);
+        return liveFor(batch);
+      },
+      onError: (message) => errors.push(message),
+    });
+    assert.ok(opened >= 3, 'a failed batch must not stop the batches after it');
+    assertOnlySkippedFailed(results, entries, probed);
+    assert.equal(errors.length, 1);
+    assert.match(errors[0], /page crashed/);
+  });
+
+  it('keeps the other batches when probing throws, and still closes that page', async () => {
+    const entries = candidates(20);
+    const probed = [];
+    const errors = [];
+    let closed = 0;
+    let batches = 0;
+    const results = await probeYouTubeBatches(entries, {
+      openPage: async () => ({ close: async () => { closed += 1; } }),
+      probeBatch: async (batch) => {
+        batches += 1;
+        if (batches === 1) throw new Error('page navigation failed');
+        probed.push(...batch);
+        return liveFor(batch);
+      },
+      onError: (message) => errors.push(message),
+    });
+    assert.equal(closed, batches, 'every opened page is closed, including the one that threw');
+    assertOnlySkippedFailed(results, entries, probed);
+    assert.equal(errors.length, 1);
+    assert.match(errors[0], /page navigation failed/);
+  });
+});
+
 describe('probeHlsCandidate', () => {
   const MEDIA_URL = 'https://cdn.example.com/live/index.m3u8';
   const hls = (url = MEDIA_URL) => parsed(url).candidate;
@@ -242,18 +309,66 @@ describe('probeHlsCandidate', () => {
       const { verdict } = await probeHlsCandidate(hls(), server);
       assert.equal(verdict.verdict, 'failed');
       assert.equal(verdict.outcome.kind, 'hls-fatal');
-      assert.match(verdict.outcome.detail, /^media playlist did not advance in 6 s$/);
-      assert.deepEqual(server.requests.map((request) => request.url), [MEDIA_URL, MEDIA_URL]);
-      assert.deepEqual(server.delays, [6_000]);
+      assert.match(verdict.outcome.detail, /^media playlist did not advance in 9 s$/);
+      assert.deepEqual(server.requests.map((request) => request.url), [MEDIA_URL, MEDIA_URL, MEDIA_URL]);
+      assert.deepEqual(server.delays, [6_000, 3_000]);
     }
   });
 
   it('reads a frozen playlist as not live when its CDN rotates a segment URL token on every request', async () => {
     const tokened = (token) => playlist('#EXT-X-TARGETDURATION:6', '#EXT-X-MEDIA-SEQUENCE:120', segments(120, 3, (n) => `seg${n}.ts?token=${token}`));
-    const server = playlistServer({ [MEDIA_URL]: [tokened('a1'), tokened('b2')] });
+    const server = playlistServer({ [MEDIA_URL]: [tokened('a1'), tokened('b2'), tokened('c3')] });
     const { verdict } = await probeHlsCandidate(hls(), server);
     assert.equal(verdict.verdict, 'failed');
-    assert.match(verdict.outcome.detail, /^media playlist did not advance in 6 s$/);
+    assert.match(verdict.outcome.detail, /^media playlist did not advance in 9 s$/);
+  });
+
+  it('reloads once more after an unchanged playlist instead of calling it frozen', async () => {
+    const media = (sequence) => playlist('#EXT-X-TARGETDURATION:6', `#EXT-X-MEDIA-SEQUENCE:${sequence}`, segments(sequence, 3));
+    const server = playlistServer({ [MEDIA_URL]: [media(10), media(10), media(11)] });
+    const { verdict } = await probeHlsCandidate(hls(), server);
+    assert.deepEqual(verdict, { verdict: 'live', video: null });
+    assert.deepEqual(server.requests.map((request) => request.url), [MEDIA_URL, MEDIA_URL, MEDIA_URL]);
+    assert.deepEqual(server.delays, [6_000, 3_000]);
+  });
+
+  it('calls a playlist frozen only after a second unchanged reload', async () => {
+    const media = playlist('#EXT-X-TARGETDURATION:6', '#EXT-X-MEDIA-SEQUENCE:10', segments(10, 3));
+    const server = playlistServer({ [MEDIA_URL]: [media, media, media] });
+    const { verdict } = await probeHlsCandidate(hls(), server);
+    assert.equal(verdict.verdict, 'failed');
+    assert.equal(verdict.outcome.kind, 'hls-fatal');
+    assert.match(verdict.outcome.detail, /^media playlist did not advance in 9 s$/);
+    assert.equal(server.requests.length, 3);
+    assert.deepEqual(server.delays, [6_000, 3_000]);
+  });
+
+  it('reads a deadline-clipped lone reload as unverifiable rather than frozen', async () => {
+    const server = playlistServer({ [MEDIA_URL]: [playlist('#EXT-X-TARGETDURATION:6', '#EXT-X-MEDIA-SEQUENCE:5', segments(5, 2))] });
+    let clock = 0;
+    const { verdict } = await probeHlsCandidate(hls(), {
+      ...server,
+      now: () => clock,
+      fetch: async (url, init) => {
+        clock += 12_000;
+        return server.fetch(url, init);
+      },
+    });
+    assert.deepEqual(verdict, { verdict: 'failed', outcome: { kind: 'timeout' } });
+    assert.deepEqual(server.delays, [LIVE_VIDEO_TIMING.verdictDeadlineMs - 12_000]);
+  });
+
+  it('reports the probe deadline as a timeout and a connect failure by its error code', async () => {
+    const timedOut = await probeHlsCandidate(hls(), {
+      fetch: async () => { throw Object.assign(new Error('timed out'), { name: 'TimeoutError' }); },
+    });
+    assert.deepEqual(timedOut.verdict, { verdict: 'failed', outcome: { kind: 'timeout' } });
+
+    const unreachable = await probeHlsCandidate(hls(), {
+      fetch: async () => { throw Object.assign(new Error('fetch failed'), { cause: { code: 'UND_ERR_CONNECT_TIMEOUT' } }); },
+    });
+    assert.equal(unreachable.verdict.outcome.kind, 'hls-fatal');
+    assert.equal(unreachable.verdict.outcome.detail, 'UND_ERR_CONNECT_TIMEOUT');
   });
 
   it('reads a playlist without PROGRAM-DATE-TIME as live once its media sequence advances', async () => {
@@ -386,7 +501,7 @@ describe('probeHlsCandidate', () => {
     assert.match(await detail(playlist('#EXT-X-TARGETDURATION:6')), /^media playlist has no segments/);
   });
 
-  it('waits one target duration, clamped to 1-10 s and to the time left before the deadline', async () => {
+  it('waits one target duration, then half of it, clamped to 1-10 s and to the time left before the deadline', async () => {
     const frozen = (...tags) => playlist(...tags, '#EXT-X-MEDIA-SEQUENCE:5', segments(5, 2));
     const waitFor = async (body, fetchMs) => {
       const server = playlistServer({ [MEDIA_URL]: [body] });
@@ -401,9 +516,10 @@ describe('probeHlsCandidate', () => {
       });
       return server.delays;
     };
-    assert.deepEqual(await waitFor(frozen('#EXT-X-TARGETDURATION:30'), 1_000), [10_000]);
-    assert.deepEqual(await waitFor(frozen('#EXT-X-TARGETDURATION:0'), 1_000), [1_000]);
-    assert.deepEqual(await waitFor(frozen(), 1_000), [6_000]);
+    assert.deepEqual(await waitFor(frozen('#EXT-X-TARGETDURATION:30'), 1_000), [10_000, 5_000]);
+    assert.deepEqual(await waitFor(frozen('#EXT-X-TARGETDURATION:0'), 1_000), [1_000, 500]);
+    assert.deepEqual(await waitFor(frozen(), 1_000), [6_000, 3_000]);
+    // A 12 s first fetch leaves no room for the second look, so the lone wait is all there is.
     assert.deepEqual(await waitFor(frozen('#EXT-X-TARGETDURATION:6'), 12_000), [LIVE_VIDEO_TIMING.verdictDeadlineMs - 12_000]);
   });
 });

@@ -20,8 +20,10 @@ An entry is a YouTube video ID, any YouTube watch/live/embed/youtu.be URL, a
 youtube.com/channel/UC... URL (plays whatever that channel has live), or an https .m3u8 URL.
 Label an entry with name=, e.g. kyiv=https://www.youtube.com/watch?v=e2gC37ILQmk
 
-YouTube entries play in headless Chromium as if embedded on ${PROBE_ORIGIN}.
-HLS entries are fetched from this machine. Exits 1 when any entry is not live.`;
+YouTube entries play in headless Chromium as if embedded on ${PROBE_ORIGIN}, so a LIVE
+verdict covers the web dashboard only; the desktop sidecar embed (http://localhost:<port>)
+is not probed here. HLS entries are fetched from this machine.
+Exits 1 when any entry is not live.`;
 
 const PROBLEM_WHY = {
   'not-https': 'the manifest must be an https URL',
@@ -75,7 +77,7 @@ function why(result) {
   const isHls = result.parsed.candidate.kind === 'hls';
   switch (verdict.verdict) {
     case 'live':
-      return isHls ? 'HLS playlist is live (it advanced between two fetches)' : 'YouTube reports a live stream (isLive=true) and it is playing';
+      return isHls ? 'HLS playlist is live (it advanced between reloads)' : 'YouTube reports a live stream (isLive=true) and it is playing';
     case 'recording':
       if (isHls) return 'HLS playlist has ended (VOD or ENDLIST)';
       return `ended recording (isLive=false, duration ${formatSeconds(result.durationSeconds ?? 0)})`;
@@ -138,6 +140,11 @@ export function observationFromRecord(record) {
   };
 }
 
+/** The verdict for a candidate no probe ever settled: a stalled poll, or a batch that threw. */
+function timedOutResult() {
+  return { verdict: { verdict: 'failed', outcome: { kind: 'timeout' } }, durationSeconds: null, verdictAtMs: null };
+}
+
 /** Mounts every candidate on one page, then polls until each has a settled verdict. */
 export async function probeYouTubeCandidates(candidates, { page, sleep }) {
   await page.mount(candidates.map((candidate) => (candidate.kind === 'video'
@@ -154,7 +161,7 @@ export async function probeYouTubeCandidates(candidates, { page, sleep }) {
     });
     if (results.every(Boolean)) return results;
     if (poll >= MAX_POLLS) {
-      return results.map((result) => result ?? { verdict: { verdict: 'failed', outcome: { kind: 'timeout' } }, durationSeconds: null, verdictAtMs: null });
+      return results.map((result) => result ?? timedOutResult());
     }
     await sleep(LIVE_VIDEO_TIMING.pollMs);
   }
@@ -259,20 +266,39 @@ async function openProbePage(browser) {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/**
+ * One page per batch, in order. A batch that cannot open or probe fails only its own entries:
+ * a crashed page must not discard the batches already classified or the ones still to come.
+ */
+export async function probeYouTubeBatches(candidates, {
+  openPage,
+  probeBatch = probeYouTubeCandidates,
+  onError = (message) => console.error(message),
+} = {}) {
+  const results = [];
+  for (let start = 0; start < candidates.length; start += BATCH_SIZE) {
+    const batch = candidates.slice(start, start + BATCH_SIZE);
+    let probed = null;
+    try {
+      const page = await openPage();
+      try {
+        probed = await probeBatch(batch, { page, sleep });
+      } finally {
+        await page.close();
+      }
+    } catch (error) {
+      onError(`live-video: batch ${start / BATCH_SIZE + 1} failed: ${error?.message ?? error}`);
+    }
+    results.push(...(probed ?? batch.map(() => timedOutResult())));
+  }
+  return results;
+}
+
 async function probeYouTubeWithBrowser(candidates) {
   const { chromium } = await import('@playwright/test');
   const browser = await chromium.launch({ headless: true, args: ['--autoplay-policy=no-user-gesture-required'] });
   try {
-    const results = [];
-    for (let start = 0; start < candidates.length; start += BATCH_SIZE) {
-      const page = await openProbePage(browser);
-      try {
-        results.push(...await probeYouTubeCandidates(candidates.slice(start, start + BATCH_SIZE), { page, sleep }));
-      } finally {
-        await page.close();
-      }
-    }
-    return results;
+    return await probeYouTubeBatches(candidates, { openPage: () => openProbePage(browser) });
   } finally {
     await browser.close();
   }
@@ -407,16 +433,29 @@ export async function probeHlsCandidate(candidate, { fetch: fetchPlaylist = (...
       if (before.kind !== 'live-candidate') return settle(before);
       // Reload after one target duration, never past the probe deadline, and require progress.
       const targetMs = Math.min(Math.max(before.targetSeconds, 1), HLS_MAX_RELOAD_WAIT_SECONDS) * 1000;
-      const waitMs = Math.max(0, Math.min(targetMs, LIVE_VIDEO_TIMING.verdictDeadlineMs - (now() - startedAt)));
-      await delay(waitMs, signal);
-      const reloadFetched = await get(response.url || url);
-      if (reloadFetched.error) return fatal(reloadFetched.error);
-      const reload = reloadFetched.response;
-      if (!reload.ok) return { verdict: observe({ failure: { kind: 'http', status: reload.status } }) };
-      const after = readHlsPlaylist(await reload.text());
-      if (after.kind !== 'live-candidate') return settle(after);
-      if (!playlistAdvanced(before, after)) return fatal(`media playlist did not advance in ${formatSeconds(waitMs / 1000)}`);
-      return { verdict: observe({ manifest: 'live' }) };
+      const timeLeftMs = () => LIVE_VIDEO_TIMING.verdictDeadlineMs - (now() - startedAt);
+      const firstWaitMs = Math.max(0, Math.min(targetMs, timeLeftMs()));
+      let waitedMs = 0;
+      let reloads = 0;
+      // RFC 8216 6.3.4: one unchanged reload is normal — a CDN edge can still hold the previous
+      // copy — so look again after half a target duration before calling the playlist frozen.
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const waitMs = attempt === 0 ? firstWaitMs : targetMs / 2;
+        if (attempt > 0 && timeLeftMs() < waitMs) break;
+        await delay(waitMs, signal);
+        waitedMs += waitMs;
+        reloads++;
+        const reloadFetched = await get(response.url || url);
+        if (reloadFetched.error) return fatal(reloadFetched.error);
+        const reload = reloadFetched.response;
+        if (!reload.ok) return { verdict: observe({ failure: { kind: 'http', status: reload.status } }) };
+        const after = readHlsPlaylist(await reload.text());
+        if (after.kind !== 'live-candidate') return settle(after);
+        if (playlistAdvanced(before, after)) return { verdict: observe({ manifest: 'live' }) };
+      }
+      // The deadline clipped the only wait below one segment, so "frozen" is not a safe read.
+      if (reloads < 2 && firstWaitMs < targetMs) return { verdict: observe({ elapsedMs: LIVE_VIDEO_TIMING.verdictDeadlineMs }) };
+      return fatal(`media playlist did not advance in ${formatSeconds(waitedMs / 1000)}`);
     }
     return fatal('too many nested playlists');
   } catch (error) {
