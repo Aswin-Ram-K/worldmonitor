@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { before, beforeEach, test } from 'node:test';
 import { build } from 'esbuild';
 import { resolve } from 'node:path';
+import { INTEL_TOPIC_IDS, MIN_ADVISORY_COUNTRY_COVERAGE } from '../shared/intelligence-snapshots.js';
 
 let source: string;
 let app: typeof import('../src/services/satellites') & typeof import('../src/services/security-advisories') & typeof import('../src/services/gdelt-intel');
@@ -11,6 +12,13 @@ let calls = 0;
 const satellite = { id: '25544', name: 'ISS', country: 'US', type: 'station', line1: '1 25544U 98067A   19156.50900463  .00003075  00000-0  59442-4 0  9992', line2: '2 25544  51.6433  59.2583 0008217  16.4489 347.6017 15.51174618173442' };
 const advisory = { title: 'Travel update', link: 'https://example.com/advice', pubDate: '2026-09-15T00:00:00Z', source: 'FCDO', sourceCountry: 'UK', level: 'caution', country: 'UA' };
 const article = (title: string) => ({ title, url: `https://example.com/${title}`, source: 'example.com', date: '20260915T000000Z', image: '', language: 'English', tone: 0 });
+const coveredByCountry = Object.fromEntries(Array.from({ length: MIN_ADVISORY_COUNTRY_COVERAGE }, (_, i) => [
+  `C${String(i).padStart(3, '0')}`,
+  i === 0 ? 'caution' : 'normal',
+]));
+const gdeltTopics = (articlesById: Record<string, ReturnType<typeof article>[]> = {}) => ({
+  topics: INTEL_TOPIC_IDS.map(id => ({ id, articles: articlesById[id] ?? [] })),
+});
 
 before(async () => {
   const result = await build({
@@ -75,7 +83,7 @@ test('advisory unavailable is not successful empty; stale data expires and malfo
   response = new Error('503');
   assert.deepEqual(await app.loadAdvisoriesFromServer(), { ok: false, advisories: [] });
   hydrated = { advisories: [{ ...advisory, pubDate: 'bad' }], byCountry: {} };
-  response = { advisories: [advisory], byCountry: {} };
+  response = { advisories: [advisory], byCountry: coveredByCountry };
   const good = await app.loadAdvisoriesFromServer();
   assert.equal(good.ok, true);
   assert.equal(good.advisories[0]?.pubDate.toISOString(), advisory.pubDate.replace('Z', '.000Z'));
@@ -126,7 +134,7 @@ for (const name of ['fetchGdeltArticles', 'fetchPositiveGdeltArticles'] as const
 test('GDELT accepts confirmed empty topics and expires unused hydration', async t => {
   let now = Date.now(); t.mock.method(Date, 'now', () => now);
   const [first, second] = app.INTEL_TOPICS;
-  hydrated = { topics: [{ id: first!.id, articles: [] }, { id: second!.id, articles: [article('bootstrap')] }] };
+  hydrated = gdeltTopics({ [second!.id]: [article('bootstrap')] });
   assert.deepEqual((await app.fetchTopicIntelligence(first!)).articles, []);
   assert.equal(calls, 0);
   now += 61 * 60_000;

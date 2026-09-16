@@ -753,7 +753,8 @@ callerTest('availability callers clear expired advisories and expose failure unt
     const cache: { advisories?: unknown[] } = {};
     let mode = 'good';
     window.fetch = async () => mode === 'error' ? new Response('{}', { status: 503 }) : new Response(JSON.stringify({
-      advisories: mode === 'good' ? [{ title: 'Controlled travel advisory', link: 'https://example.com/advice', pubDate: '2026-09-15T00:00:00Z', source: 'FCDO', sourceCountry: 'UK', level: 'caution', country: 'UA' }] : [], byCountry: {},
+      advisories: mode === 'good' ? [{ title: 'Controlled travel advisory', link: 'https://example.com/advice', pubDate: '2026-09-15T00:00:00Z', source: 'FCDO', sourceCountry: 'UK', level: 'caution', country: 'UA' }] : [],
+      byCountry: mode === 'good' ? Object.fromEntries(Array.from({ length: 100 }, (_, i) => [`C${String(i).padStart(3, '0')}`, i === 0 ? 'caution' : 'normal'])) : {},
     }));
     const loader = new DataLoaderManager({ panels: { 'security-advisories': panel }, intelligenceCache: cache } as never, {} as never);
     const refresh = async () => {
