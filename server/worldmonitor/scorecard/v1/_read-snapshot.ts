@@ -172,9 +172,6 @@ export async function readFiveFactorSnapshot(
       }
     }
   } catch (error) {
-    // A timed-out read-model HMGET already spent the shared deadline.
-    // Falling through would start the canonical GET with leftover ms and
-    // throw TimeoutError out of the reader.
     if (isReadDeadlineAbort(error)) return serveStale(canonicalLastGood);
   }
   return readCanonicalFallback(deadlineAtMs);
