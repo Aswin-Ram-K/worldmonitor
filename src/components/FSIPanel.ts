@@ -104,8 +104,8 @@ export class FSIPanel extends Panel {
         const hdr = (hydrated.headerMetrics ?? {}) as Record<string, Record<string, unknown> | null>;
         fsiValue = Number(hdr?.fsi?.value ?? 0);
         fsiLabel = String(hdr?.fsi?.label ?? '');
-        hygPrice = Number(hdr?.hyg?.value ?? 0);
-        tltPrice = Number(hdr?.tlt?.value ?? 0);
+        hygPrice = Number(hdr?.fsi?.hygPrice ?? 0);
+        tltPrice = Number(hdr?.fsi?.tltPrice ?? 0);
         vix = Number(hdr?.vix?.value ?? 0);
         hySpread = Number(hdr?.hySpread?.value ?? 0);
       }
