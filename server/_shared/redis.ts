@@ -1251,6 +1251,14 @@ export async function getHashFieldsBatch(
     }
   } catch (err) {
     console.warn('[redis] getHashFieldsBatch failed:', errMsg(err));
+    // A caller that passed an explicit budget must see the abort. Swallowing
+    // it as an empty map made scorecard treat a deadline expiry as a miss
+    // and start the multi-MB canonical GET with leftover milliseconds.
+    if (
+      timeoutMs !== undefined
+      && err instanceof Error
+      && (err.name === 'TimeoutError' || err.name === 'AbortError')
+    ) throw err;
   }
   return result;
 }
