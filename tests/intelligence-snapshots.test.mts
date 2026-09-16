@@ -7,6 +7,7 @@ import {
   isGdeltTopicSnapshot,
 } from '../shared/intelligence-snapshots.js';
 import { INTEL_TOPIC_IDS as SEED_INTEL_TOPIC_IDS } from '../scripts/seed-gdelt-intel.mjs';
+import { MIN_ADVISORY_COUNTRY_COVERAGE as SEED_MIN_ADVISORY_COUNTRY_COVERAGE } from '../scripts/seed-security-advisories.mjs';
 
 const advisory = {
   title: 'Travel update',
@@ -41,6 +42,10 @@ function topicSnapshot(ids: readonly string[], articlesById: Record<string, type
 test('seed INTEL_TOPIC_IDS stay the six shared snapshot ids', () => {
   assert.deepEqual([...SEED_INTEL_TOPIC_IDS], [...INTEL_TOPIC_IDS]);
   assert.equal(INTEL_TOPIC_IDS.length, 6);
+});
+
+test('advisory seeder floor stays aligned with the shared snapshot constant', () => {
+  assert.equal(SEED_MIN_ADVISORY_COUNTRY_COVERAGE, MIN_ADVISORY_COUNTRY_COVERAGE);
 });
 
 test('isAdvisorySnapshot keeps confirmed-empty 200 and rejects thin country indexes', () => {

@@ -2,8 +2,11 @@
 
 import { loadEnvFile, loadSharedConfig, CHROME_UA, runSeed } from './_seed-utils.mjs';
 import { decodeHtmlEntities } from './_html-entities.mjs';
-import { MIN_ADVISORY_COUNTRY_COVERAGE } from '../shared/intelligence-snapshots.js';
-export { MIN_ADVISORY_COUNTRY_COVERAGE };
+
+// Keep this numeric floor aligned with shared/intelligence-snapshots.js.
+// This nixpacks-root-scripts service cannot import ../shared/*.js: /app is
+// scripts/, so that ESM edge crashes the cron at startup.
+export const MIN_ADVISORY_COUNTRY_COVERAGE = 100;
 
 loadEnvFile(import.meta.url);
 
