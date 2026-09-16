@@ -366,17 +366,16 @@ describe('startCheckout on desktop (#5911)', () => {
     ]);
   });
 
-  it('does not claim the OS browser when it only fell back to a WebView window', async () => {
-    // openExternalUrl returns 'popup' here: the bridge refused and
-    // window.open succeeded INSIDE Tauri. That is the bug this branch exists
-    // to prevent, so it must not be reported to the buyer as success.
+  it('does not open a checkout WebView when the native browser launch fails', async () => {
+    // Checkout must not open a WebView and then invite a duplicate retry.
     resetHarness(true, { invokeRejects: true });
     const checkout = await loadCheckoutModule();
 
-    assert.equal(await checkout.startCheckout('pro_monthly'), false);
+    assert.equal(await checkout.startCheckout('pro_monthly', undefined, { fallbackToPricingPage: false }), false);
 
     const harness = globalThis.__desktopCheckoutHarness;
-    assert.deepEqual(harness.toasts, [], 'a WebView fallback is not "opened in your browser"');
+    assert.deepEqual(harness.openedWindows, [], 'hosted checkout requires a native browser');
+    assert.deepEqual(harness.toasts, [], 'must not claim a successful native launch');
     assert.equal(harness.errorToasts.length, 1);
   });
 
