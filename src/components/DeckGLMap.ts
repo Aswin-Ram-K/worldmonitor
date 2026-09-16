@@ -3,10 +3,11 @@
  * Uses deck.gl for high-performance rendering of large datasets
  * Mobile devices gracefully degrade to the D3/SVG-based Map component
  */
-import { MapboxOverlay } from '@deck.gl/mapbox';
+import { MapLibreOverlay } from '@deck.gl/maplibre';
 import type { Layer, LayersList, PickingInfo } from '@deck.gl/core';
 import { GeoJsonLayer, ScatterplotLayer, PathLayer, IconLayer, TextLayer, PolygonLayer } from '@deck.gl/layers';
-import maplibregl from 'maplibre-gl';
+import * as maplibregl from 'maplibre-gl';
+import maplibreWorkerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url';
 import type { StyleSpecification } from 'maplibre-gl';
 import { FALLBACK_DARK_STYLE, FALLBACK_LIGHT_STYLE, getMapProvider, getMapTheme, isLightMapTheme } from '@/config/basemap';
 import { getStyleForProvider } from '@/config/basemap-styles';
@@ -535,7 +536,7 @@ const DECK_INTERLEAVED_RACE_SOURCE_RE = /(?:^|[/(])deck-stack-[A-Za-z0-9_-]+\.js
  * custom-layer hook → deck iterates the layer list and hits a layer that was
  * finalized between resolveLayers and renderLayers.
  *
- * MapboxOverlay's own onError is bypassed because maplibre — not deck — owns
+ * MapLibreOverlay's own onError is bypassed because maplibre — not deck — owns
  * the render-loop callstack here (deck doesn't see the throw, so onError is
  * never invoked). The next frame renders cleanly with no user-visible
  * artifact, so swallowing here is safe.
@@ -574,7 +575,7 @@ export class DeckGLMap {
   private static readonly MAX_CLUSTER_LEAVES = 200;
 
   private container: HTMLElement;
-  private deckOverlay: MapboxOverlay | null = null;
+  private deckOverlay: MapLibreOverlay | null = null;
   private maplibreMap: maplibregl.Map | null = null;
   private state: DeckMapState;
   private popup: MapPopup;
@@ -1046,7 +1047,7 @@ export class DeckGLMap {
     wrapper.id = 'deckglMapWrapper';
     wrapper.style.cssText = 'position: relative; width: 100%; height: 100%; overflow: hidden;';
 
-    // MapLibre container - deck.gl renders directly into MapLibre via MapboxOverlay
+    // MapLibre container - deck.gl renders directly into MapLibre via MapLibreOverlay
     const mapContainer = document.createElement('div');
     mapContainer.id = 'deckgl-basemap';
     mapContainer.style.cssText = 'position: absolute; top: 0; left: 0; width: 100%; height: 100%;';
@@ -1075,6 +1076,7 @@ export class DeckGLMap {
   }
 
   private async initMapLibre(): Promise<void> {
+    maplibregl.setWorkerUrl(maplibreWorkerUrl);
     if (maplibregl.getRTLTextPluginStatus() === 'unavailable') {
       maplibregl.setRTLTextPlugin(
         '/mapbox-gl-rtl-text.min.js',
@@ -1172,7 +1174,7 @@ export class DeckGLMap {
     let tileLoadOk = false;
     let tileErrorCount = 0;
 
-    this.maplibreMap.on('error', (e: { error?: Error; message?: string }) => {
+    this.maplibreMap.on('error', (e: { error?: { message: string }; message?: string }) => {
       const msg = e.error?.message ?? e.message ?? '';
       console.warn('[DeckGLMap] map error:', msg);
       if (msg.includes('Failed to fetch') || msg.includes('AJAXError') || msg.includes('CORS') || msg.includes('NetworkError') || msg.includes('403') || msg.includes('Forbidden')) {
@@ -1240,7 +1242,7 @@ export class DeckGLMap {
 
     installDeckInterleavedRaceFilter();
 
-    this.deckOverlay = new MapboxOverlay({
+    this.deckOverlay = new MapLibreOverlay({
       interleaved: true,
       layers: this.buildLayers(true),
       getTooltip: (info: PickingInfo) => this.getTooltip(info),
@@ -2321,7 +2323,7 @@ export class DeckGLMap {
         getFillColor: (d) => ('count' in d ? [0, 212, 255, 180] : [255, 215, 0, 200]) as [number, number, number, number],
         radiusUnits: 'pixels',
         pickable: true,
-        // Consume the pick (return true) so MapboxOverlay onClick → handleClick
+        // Consume the pick (return true) so MapLibreOverlay onClick → handleClick
         // does not double-fire. Cluster vs leaf is routed in handleWebcamLayerClick.
         onClick: (info) => this.handleWebcamLayerClick(info),
       }));
@@ -5492,7 +5494,7 @@ export class DeckGLMap {
 
   /**
    * Layer-level webcam pick. Returns true so deck.gl consumes the event and the
-   * global MapboxOverlay handler does not run a second time (#3877 / #4230).
+   * global MapLibreOverlay handler does not run a second time (#3877 / #4230).
    * Clusters zoom in instead of opening a tab per camera.
    */
   private handleWebcamLayerClick(info: PickingInfo): boolean {
@@ -8159,7 +8161,7 @@ export class DeckGLMap {
       if (timeoutId) { clearTimeout(timeoutId); timeoutId = null; }
     };
 
-    const onError = (e: { error?: Error; message?: string }) => {
+    const onError = (e: { error?: { message: string }; message?: string }) => {
       if (gen !== this.tileMonitorGeneration) { cleanup(); return; }
       const msg = e.error?.message ?? e.message ?? '';
       if (msg.includes('Failed to fetch') || msg.includes('AJAXError') || msg.includes('CORS') || msg.includes('NetworkError') || msg.includes('403') || msg.includes('Forbidden')) {
