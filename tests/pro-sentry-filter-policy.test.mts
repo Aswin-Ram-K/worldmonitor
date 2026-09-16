@@ -1337,8 +1337,36 @@ describe('marketing ignoreErrors — injected-script classes (2026-09-02 triage)
     );
   });
 
+  it('drops the WebAuthn service-connection rejection (WORLDMONITOR-12H)', () => {
+    // Verbatim production value: Chrome 152 / macOS on `/pro`, zero frames,
+    // `onunhandledrejection`, breadcrumbs ending at Clerk's
+    // `POST /v1/client/sign_ins` after clicks on the identifier field.
+    // Chromium raises it when the platform authenticator service cannot be
+    // reached, from the same WebAuthn surface as WORLDMONITOR-11Q.
+    assert.equal(
+      isIgnored('Error', 'NotSupportedError: Error connecting to Web Authentication service.'),
+      true,
+    );
+    assert.equal(
+      isIgnored('Error', 'Error: NotSupportedError: Error connecting to Web Authentication service.'),
+      true,
+    );
+  });
+
   it('keeps other NotSupportedError messages so a real one still reports', () => {
+    for (const prefix of ['', 'Error: ']) {
+      for (const suffix of ['\n', '\r', '\r\n', '\u2028', '\u2029']) {
+        assert.equal(
+          isIgnored('Error', `${prefix}NotSupportedError: Error connecting to Web Authentication service.${suffix}`),
+          false,
+        );
+      }
+    }
     assert.equal(isIgnored('Error', 'NotSupportedError: The operation is not supported.'), false);
+    assert.equal(
+      isIgnored('Error', 'NotSupportedError: Error connecting to Web Authentication service. Retrying checkout'),
+      false,
+    );
   });
 
   it('pins the marketing surface as WebAuthn-free, which is what licenses the rule', () => {
