@@ -563,6 +563,9 @@ test('decision brief clears and stays usable when a selection change aborts a ca
 
 for (const { mobile, light } of [{ mobile: false, light: false }, { mobile: true, light: false }, { mobile: false, light: true }, { mobile: true, light: true }]) test(`commodity decision brief ${mobile ? 'mobile' : 'desktop'} ${light ? 'light' : 'dark'} captures selection and actual exports`, async ({ page, countryBrief }, testInfo) => {
   void countryBrief;
+  // Three commodities × capture, dual downloads, export-page asserts, and
+  // screenshots regularly exhaust the 90s suite default under CI worker load.
+  test.setTimeout(180_000);
   if (mobile) await page.setViewportSize({ width: 390, height: 844 });
   await installCommodityBriefData(page);
   await page.addInitScript(theme => localStorage.setItem('worldmonitor-theme', theme), light ? 'light' : 'dark');
