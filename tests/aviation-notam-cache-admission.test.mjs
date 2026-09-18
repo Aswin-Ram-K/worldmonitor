@@ -71,3 +71,22 @@ test('healthy stale seed opt-in retains prefixed live-cache fallback', async () 
   await loadNotamClosures();
   assert.equal(providerCalls, 1);
 });
+test('write failure keeps local closures visible through later Redis read errors without new provider work', async () => {
+  const fetchImpl = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    if (url.startsWith('https://redis.test/') && !url.includes('/get/')) return new Response('', { status: 503 });
+    if (!url.startsWith('https://redis.test/')) {
+      providerCalls++;
+      return Response.json([{ itema: 'EGLL', iteme: 'Airport closed' }]);
+    }
+    return fetchImpl(input, init);
+  };
+  assert.deepEqual((await loadNotamClosures()).closedIcaos, ['EGLL']);
+  failures.add(key); failures.add(meta);
+  const ops = await getAirportOpsSummary({}, { airports: 'LHR' });
+  assert.equal(ops.summaries[0].closureStatus, true);
+  const delays = await listAirportDelays({}, {});
+  assert.ok(delays.alerts.some(row => row.iata === 'LHR' && row.reason.includes('Airport closed')));
+  assert.equal(providerCalls, 1);
+});
