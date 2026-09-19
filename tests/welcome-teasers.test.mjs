@@ -47,6 +47,26 @@ function read(relativePath) {
 const snapshot = JSON.parse(read(resolveLatestLivePulseSnapshotPath(repoRoot)));
 const committed = JSON.parse(read(TEASERS_OUTPUT_PATH));
 
+// Positional, not title-keyed. build-welcome-teasers.mjs publishes an
+// order-preserving `headlines.slice(0, HEADLINE_ROWS)`, so row N of the strip is
+// row N of the capture. One wire story can arrive twice under two editions of
+// one publisher: on 2026-09-14 the digest returned a France 24 article as both
+// "France 24" and "France 24 LatAm" with a byte-identical title, url and
+// publishedAt. A Map keyed on title collapsed that pair, compared row 2 against
+// row 3's masthead, and reddened the weekly refresh over a capture that was
+// correct (#8339). Comparing by index also catches reordering, which a title
+// lookup cannot see.
+function assertPublishedRowsMatchCapture(publishedRows, capturedHeadlines) {
+  publishedRows.forEach((row, index) => {
+    const captured = capturedHeadlines[index];
+    assert.ok(captured, `"${row.title}" is not in the frozen capture — it was hand-written`);
+    assert.equal(row.title, captured.title);
+    assert.equal(row.source, captured.source);
+    assert.equal(row.url, captured.url);
+    assert.equal(row.publishedAt, Date.parse(captured.publishedAt));
+  });
+}
+
 describe('welcome teaser strip is derived from the committed pulse snapshot', () => {
   it('the committed teasers.json is exactly what the generator produces', async () => {
     assert.equal(
@@ -87,14 +107,30 @@ describe('welcome teaser strip is derived from the committed pulse snapshot', ()
   });
 
   it('every published headline came from the snapshot capture', () => {
-    const frozen = new Map(snapshot.headlines.map((h) => [h.title, h]));
-    for (const headline of committed.headlines) {
-      const source = frozen.get(headline.title);
-      assert.ok(source, `"${headline.title}" is not in the frozen capture — it was hand-written`);
-      assert.equal(headline.source, source.source);
-      assert.equal(headline.url, source.url);
-      assert.equal(headline.publishedAt, Date.parse(source.publishedAt));
-    }
+    assertPublishedRowsMatchCapture(committed.headlines, snapshot.headlines);
+  });
+
+  it('attributes each edition when one story is captured twice (#8339)', () => {
+    const shared = {
+      title: 'US hosts G20 energy talks in Texas as Iran war disrupts global fuel markets',
+      url: 'https://www.france24.com/en/americas/20260914-us-g20-energy-talks-iran-war',
+      publishedAt: '2026-09-14T01:42:29.000Z',
+    };
+    const captured = [
+      { ...shared, source: 'France 24' },
+      { ...shared, source: 'France 24 LatAm' },
+    ];
+    const built = buildWelcomeTeasers(
+      { ...snapshot, headlines: captured },
+      'docs/snapshots/x.json',
+    );
+
+    assert.deepEqual(
+      built.headlines.map((row) => row.source),
+      ['France 24', 'France 24 LatAm'],
+      'the strip must publish both captured editions, not collapse them to one masthead',
+    );
+    assertPublishedRowsMatchCapture(built.headlines, captured);
   });
 
   it('CII scores match the snapshot rather than drifting away from it', () => {
