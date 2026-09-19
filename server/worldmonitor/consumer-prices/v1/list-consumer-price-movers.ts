@@ -13,7 +13,10 @@ export async function listConsumerPriceMovers(
   _ctx: unknown,
   req: ListConsumerPriceMoversRequest,
 ): Promise<ListConsumerPriceMoversResponse> {
-  const market = req.marketCode || DEFAULT_MARKET;
+  // Seed keys are lowercase (`consumer-prices:movers:ae:30d`); the OpenAPI
+  // contract documents ISO 3166-1 alpha-2, which callers send as "US"/"AE".
+  // Normalize so a spec-compliant uppercase code hits the seeded row.
+  const market = (req.marketCode || DEFAULT_MARKET).trim().toLowerCase();
   const range = VALID_RANGES.has(req.range ?? '') ? req.range! : DEFAULT_RANGE;
   const key = `consumer-prices:movers:${market}:${range}`;
 

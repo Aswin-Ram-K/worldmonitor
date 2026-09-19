@@ -36,6 +36,21 @@ for (const [query, expected] of [['', 10], ['&limit=0', 10], ['&limit=3', 3], ['
   });
 }
 
+test('uppercase ISO-2 market codes hit the lowercase seed key', async () => {
+  const routes = createConsumerPricesServiceRoutes({ listConsumerPriceMovers } as ConsumerPricesServiceHandler);
+  const route = routes.find((entry) => entry.path.endsWith('/list-consumer-price-movers'))!;
+  const response = await route.handler(new Request(`https://worldmonitor.app${route.path}?market_code=US&range=90d`));
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  // The OpenAPI contract documents ISO 3166-1 alpha-2 ("US"); the seeder
+  // writes lowercase keys, so the handler must normalize before the lookup.
+  assert.deepEqual(keys, ['consumer-prices:movers:us:90d']);
+  assert.equal(body.upstreamUnavailable, false);
+  // The cached snapshot echoes its seeded market code; the assertion that
+  // matters is the normalized lookup key above.
+  assert.equal(body.marketCode, 'ae');
+});
+
 test('both movers producers include the public 90d range and seed metadata', () => {
   const publish = readFileSync(new URL('../consumer-prices-core/src/jobs/publish.ts', import.meta.url), 'utf8');
   const seed = readFileSync(new URL('../scripts/seed-consumer-prices.mjs', import.meta.url), 'utf8');
