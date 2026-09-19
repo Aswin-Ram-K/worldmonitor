@@ -21,7 +21,6 @@
 
 import { countryBox, inBox, splitCountryBox, type CountryBox } from '../../../../shared/country-bbox';
 import { resolveCountryCode } from '../../../../shared/country-code-resolve';
-// @ts-expect-error — plain ESM JS module, no TS declarations beyond country-mention.d.ts
 import { countryMentionTerms, mentionsCountry } from '../../../../shared/country-mention.js';
 import type {
   CountryTimelineIncident,
