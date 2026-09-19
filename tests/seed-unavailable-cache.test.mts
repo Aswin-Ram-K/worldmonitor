@@ -131,6 +131,31 @@ it('preserves a valid empty crypto sector collection', async () => {
   assert.deepEqual(await response.json(), { sectors: [] });
 });
 
+it('keeps a partial oil snapshot over a failed section read out of HTTP caches', async () => {
+  // One errored section (SPR 503) with the other keys hitting must not look
+  // like "SPR does not exist": the partial body carries a fresh updatedAt but
+  // must be no-store so the slow-tier cache cannot persist the partial lie.
+  const key = 'economic:crude-inventories:v1';
+  cache.set(key, { weeks: [{ period: '2026-09-01', stocksMb: 440 }] });
+  const sprUrl = 'https://cache-redis.invalid/get/economic%3Aspr%3Av1';
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: unknown, init?: unknown) => {
+    if (String(input) === sprUrl) return new Response('', { status: 503 });
+    return (realFetch as typeof fetch)(input as never, init as never);
+  }) as typeof fetch;
+  try {
+    mode = 'hit';
+    const partial = await request('economic/v1/get-oil-inventories');
+    assertNoStore(partial);
+    const partialBody = await partial.json();
+    assert.equal(partialBody.crudeWeeks[0].stocksMb, 440);
+    assert.equal(partialBody.spr, undefined);
+    assert.notEqual(partialBody.updatedAt, '', 'a partial snapshot still carries its fresh timestamp');
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
 it('keeps an oil mapping exception out of HTTP caches without a fresh timestamp', async () => {
   mode = 'hit';
   cache.set('economic:crude-inventories:v1', { weeks: [null] });
