@@ -60,7 +60,8 @@ export function isDebugBearRumScriptFrame(filename: string): boolean {
 
 function loadDebugBearRumScript(): HTMLScriptElement | null {
   if (typeof document === 'undefined') return null;
-  if (document.querySelector<HTMLScriptElement>(`script[src="${DEBUGBEAR_RUM_SCRIPT_SRC}"]`)) return null;
+  const existing = document.querySelector<HTMLScriptElement>(`script[src="${DEBUGBEAR_RUM_SCRIPT_SRC}"]`);
+  if (existing) return existing;
 
   const script = document.createElement('script');
   script.async = true;
@@ -106,10 +107,11 @@ export function initDebugBearRum(): void {
 }
 
 function pushBounded(queue: DebugBearRumEvent[], entry: DebugBearRumEvent): void {
-  // Drop-oldest across the whole vendor array so presampling + transfer
-  // metrics survive while a noisy loop churns error snapshots. The array is
-  // the vendor's protocol buffer, so evict rather than refuse.
-  if (queue.length >= DEBUGBEAR_RUM_ERROR_QUEUE_MAX) queue.shift();
+  // Drop-oldest past index 0 so the presampling marker (and the transfer
+  // metrics/tags the vendor reads positionally) survive while a noisy loop
+  // churns error snapshots. The array is the vendor's protocol buffer, so
+  // evict rather than refuse.
+  if (queue.length >= DEBUGBEAR_RUM_ERROR_QUEUE_MAX) queue.splice(1, 1);
   queue.push(entry);
 }
 
@@ -147,14 +149,17 @@ export function isDebugBearRumActive(): boolean {
  */
 export function reportBootstrapTransferRum(sample: BootstrapTransferRumSample): void {
   if (!debugBearRumStarted || typeof window === 'undefined' || !window.dbbRum) return;
-  window.dbbRum.push(
+  const queue = window.dbbRum;
+  for (const entry of [
     ['metric1', sample.duration_ms],
     ['metric2', sample.decoded_bytes],
     ['metric3', sample.encoded_bytes],
     ['tag1', sample.tier],
     ['tag2', sample.outcome],
     ['tag3', sample.device_class],
-  );
+  ] as DebugBearRumEvent[]) {
+    pushBounded(queue, entry);
+  }
 }
 
 export function resetDebugBearRumForTesting(): void {

@@ -18,12 +18,14 @@ function updateThemeMetaColor(theme: Theme, variant = document.documentElement.d
 
 /**
  * Read the stored theme preference from localStorage.
- * Returns 'dark' or 'light' if valid, otherwise DEFAULT_THEME.
+ * Returns 'dark' or 'light' if valid; resolves 'auto' against the OS
+ * preference; otherwise DEFAULT_THEME.
  */
 export function getStoredTheme(): Theme {
   try {
     const stored = localStorage.getItem(STORAGE_KEY);
     if (stored === 'dark' || stored === 'light') return stored;
+    if (stored === 'auto') return resolveAutoTheme();
   } catch {
     // localStorage unavailable (e.g., sandboxed iframe, private browsing)
   }
@@ -39,7 +41,7 @@ export function getThemePreference(): ThemePreference {
 }
 
 function resolveAutoTheme(): Theme {
-  if (typeof window !== 'undefined' && window.matchMedia?.('(prefers-color-scheme: light)').matches) {
+  if (typeof window !== 'undefined' && window.matchMedia?.('(prefers-color-scheme: light)')?.matches) {
     return 'light';
   }
   return 'dark';

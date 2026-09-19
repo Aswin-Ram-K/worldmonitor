@@ -51,14 +51,24 @@ describe('#8369-1 Vercel Analytics URL redaction', () => {
   it('strips checkout secrets, invite tokens, referral, and Clerk params', () => {
     const redacted = redactAnalyticsUrl({
       type: 'pageview',
-      url: 'https://www.worldmonitor.app/dashboard?email=a@b.com&license_key=SEKRET&subscription_id=sub_1&payment_id=pay_1&accept-business-invite=g1&token=tok123&ref=abc&wm_referral=xyz&__clerk_handshake=h&__clerk_ticket=t&checkoutProduct=pro&checkoutDiscount=SAVE&tab=news',
+      url: 'https://www.worldmonitor.app/dashboard?email=a@b.com&license_key=SEKRET&subscription_id=sub_1&payment_id=pay_1&accept-business-invite=g1&token=tok123&access_token=qsecret&ref=abc&wm_referral=xyz&__clerk_handshake=h&__clerk_ticket=t&__clerk_foo=bar&checkoutProduct=pro&checkoutDiscount=SAVE&tab=news',
     });
     assert.ok(!redacted.url.includes('SEKRET'));
     assert.ok(!redacted.url.includes('tok123'));
+    assert.ok(!redacted.url.includes('qsecret'));
     assert.ok(!redacted.url.includes('a@b.com'));
     assert.ok(!redacted.url.includes('__clerk_handshake'));
+    assert.ok(!redacted.url.includes('__clerk_foo'));
     assert.ok(!redacted.url.includes('checkoutProduct'));
     assert.ok(redacted.url.includes('tab=news'), 'benign params survive');
+  });
+
+  it('scrubs OAuth-style hash fragments without a ?', () => {
+    const redacted = redactAnalyticsUrl({
+      type: 'pageview',
+      url: 'https://www.worldmonitor.app/dashboard#access_token=xyz&token_type=Bearer',
+    });
+    assert.ok(!redacted.url.includes('xyz'));
   });
 
   it('returns the original event object when nothing is sensitive', () => {
@@ -66,26 +76,45 @@ describe('#8369-1 Vercel Analytics URL redaction', () => {
     assert.equal(redactAnalyticsUrl(event), event);
   });
 
-  it('stripSensitiveParamsFromUrl removes secrets from the live URL early', () => {
+  function runBootStrip(href: string): string[] {
     const replaced: string[] = [];
     const savedWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
     Object.defineProperty(globalThis, 'window', {
       configurable: true,
       value: {
-        location: { href: 'https://www.worldmonitor.app/settings?accept-business-invite=g1&token=tok123&tab=general' },
+        location: { href },
         history: { replaceState: (_s: unknown, _t: string, url: string) => replaced.push(url) },
       },
     });
     try {
       stripSensitiveParamsFromUrl();
-      assert.equal(replaced.length, 1);
-      assert.ok(!replaced[0]!.includes('tok123'));
-      assert.ok(!replaced[0]!.includes('accept-business-invite'));
-      assert.ok(replaced[0]!.includes('tab=general'));
+      return replaced;
     } finally {
       if (savedWindow) Object.defineProperty(globalThis, 'window', savedWindow);
       else delete (globalThis as { window?: unknown }).window;
     }
+  }
+
+  it('boot strip removes unread secrets (email, Clerk handshake)', () => {
+    const replaced = runBootStrip(
+      'https://www.worldmonitor.app/dashboard?email=a@b.com&__clerk_handshake=h&tab=news',
+    );
+    assert.equal(replaced.length, 1);
+    assert.ok(!replaced[0]!.includes('a@b.com'));
+    assert.ok(!replaced[0]!.includes('__clerk_handshake'));
+    assert.ok(replaced[0]!.includes('tab=news'));
+    resetVercelAnalyticsForTesting();
+  });
+
+  it('boot strip preserves params deferred consumers must still read', () => {
+    // captureReferralFromUrl (ref/wm_referral), capturePendingCheckoutIntent
+    // (checkoutProduct), the invite acceptor (accept-business-invite+token),
+    // and handleCheckoutReturn (subscription_id/payment_id) all run after
+    // main.ts — stripping these at boot would break attribution/resume.
+    const replaced = runBootStrip(
+      'https://www.worldmonitor.app/dashboard?ref=abc&checkoutProduct=pro&accept-business-invite=g1&token=tok123&subscription_id=sub_1&tab=news',
+    );
+    assert.equal(replaced.length, 0, 'nothing unread to strip, so no replaceState');
     resetVercelAnalyticsForTesting();
   });
 });
@@ -97,11 +126,11 @@ describe('#8369-2 CSV formula neutralization', () => {
   // with an inline copy of the two-line pure function.
   const sanitizeCsvField = (value: string): string => {
     const text = value || '';
-    return /^[=+\-@\t\r]/.test(text) ? `'${text}` : text;
+    return /^[=+\-@\t\r\n|]/.test(text) ? `'${text}` : text;
   };
 
   it('ships the formula-prefix guard in csvRow', () => {
-    assert.match(exportSrc, /CSV_FORMULA_PREFIX_RE = \/\^\[=\+\\-@\\t\\r\]\//);
+    assert.match(exportSrc, /CSV_FORMULA_PREFIX_RE = \/\^\[=\+\\-@\\t\\r\\n\|\]\//);
     assert.match(exportSrc, /sanitizeCsvField\(v \|\| ''\)\.replace\(\/"\/g/);
     assert.match(exportSrc, /csvRow\(\[data\.brief\]\)/);
   });
@@ -212,7 +241,9 @@ describe('#8369-3 DebugBear RUM bounded error buffer', () => {
       for (let i = 0; i < DEBUGBEAR_RUM_ERROR_QUEUE_MAX + 10; i++) {
         h.listeners.get('error')!({ type: 'error', message: `e${i}` } as unknown as Event);
       }
-      assert.equal((h.win.dbbRum as unknown[]).length, DEBUGBEAR_RUM_ERROR_QUEUE_MAX);
+      const queue = h.win.dbbRum as unknown[][];
+      assert.equal(queue.length, DEBUGBEAR_RUM_ERROR_QUEUE_MAX);
+      assert.deepEqual(queue[0]![0], 'presampling');
     } finally {
       h.restore();
     }
@@ -270,19 +301,18 @@ describe('#8369-4 set_panel_enabled mixed-case catalog IDs', () => {
     assert.equal(result.changed, true);
   });
 
-  it('toggles regionalStartups when native to the tech variant', () => {
-    const panelSettings = structuredClone(getInitialPanelSettingsForVariant('tech'));
-    panelSettings['regionalStartups'] = { ...panelSettings['regionalStartups']!, enabled: false };
-    const result = evaluateSetPanelEnabled({
-      panelId: 'regionalStartups',
-      enabled: true,
-      panelSettings,
-      variant: 'tech',
-      isPro: true,
-    });
-    assert.equal(result.ok, true);
-    assert.equal(result.status, 'applied');
-    assert.equal(result.changed, true);
+  it('schema-valid-but-unknown mixed-case IDs reach catalog checks', () => {
+    const panelSettings = structuredClone(getInitialPanelSettingsForVariant('full'));
+    for (const panelId of ['GccNews', 'Markets']) {
+      const result = evaluateSetPanelEnabled({
+        panelId,
+        enabled: true,
+        panelSettings,
+        variant: 'full',
+        isPro: true,
+      });
+      assert.equal(result.reason, 'unknown_panel', panelId);
+    }
   });
 });
 

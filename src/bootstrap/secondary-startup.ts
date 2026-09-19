@@ -104,10 +104,69 @@ export function initVercelAnalytics(): void {
  * secrets, the Business Pro invite token, referral codes, Clerk handshake
  * material, and checkout-funnel params (discount/referral codes). Vercel's
  * beforeSend exists to redact event.url before ingest; sampling does not.
+ *
+ * This is the ANALYTICS-ONLY list. The boot-time live-URL strip below uses a
+ * much narrower list: anything a deferred consumer still needs to read
+ * (referral codes, checkout-intent params, invite tokens, Dodo IDs) must
+ * survive until that consumer runs, so it can never be stripped at boot.
  */
-const SENSITIVE_ANALYTICS_QUERY_RE = /^(token|accept-business-invite|email|license_key|licensekey|subscription_id|payment_id|ref|wm_referral|checkoutproduct|checkoutreferral|checkoutdiscount|checkout_product|checkout_referral|checkout_discount|__clerk_handshake|__clerk_ticket|__clerk_created|__clerk_status|affonso_referral|discount|coupon|promo|voucher)$/i;
+const SENSITIVE_ANALYTICS_QUERY_RE = /^(token|access_token|id_token|refresh_token|auth_token|invite_token|accept-business-invite|email|user_email|customer_email|license_key|licensekey|subscription_id|payment_id|ref|wm_referral|checkoutproduct|checkoutreferral|checkoutdiscount|checkout_product|checkout_referral|checkout_discount|__clerk[a-z_]*|affonso_referral|discount|coupon|promo|voucher)$/i;
 
-const SENSITIVE_ANALYTICS_HASH_RE = /^(token|access_token|id_token|__clerk_handshake|__clerk_ticket|email|license_key)$/i;
+const SENSITIVE_ANALYTICS_HASH_RE = /^(token|access_token|id_token|refresh_token|__clerk[a-z_]*|email|license_key)$/i;
+
+/**
+ * Params safe to strip from the live URL at boot: read by nobody.
+ * handleCheckoutReturn() only DELETES email/license_key (never branches on
+ * them), and no other deferred consumer reads Clerk handshake material —
+ * so removing these before analytics/RUM init cannot break referral
+ * capture, checkout-intent resume, the invite acceptor, or Dodo returns.
+ */
+const STRIPPABLE_AT_BOOT_RE = /^(email|license_key|licensekey|__clerk[a-z_]*)$/i;
+
+function scrubUrlSearchParams(parsed: URL, pattern: RegExp): boolean {
+  let changed = false;
+  for (const key of [...parsed.searchParams.keys()]) {
+    if (pattern.test(key)) {
+      parsed.searchParams.delete(key);
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+/** Scrub secret-bearing key=value pairs from a hash fragment, covering both
+ * `#head?k=v` and OAuth-style `#k=v&k2=v2` shapes. Returns the scrubbed
+ * fragment (without the leading #), or null when nothing was sensitive. */
+function scrubHashFragment(fragment: string): string | null {
+  const qIndex = fragment.indexOf('?');
+  if (qIndex >= 0) {
+    const head = fragment.slice(0, qIndex);
+    const hashParams = new URLSearchParams(fragment.slice(qIndex + 1));
+    let hashChanged = false;
+    for (const key of [...hashParams.keys()]) {
+      if (SENSITIVE_ANALYTICS_QUERY_RE.test(key) || SENSITIVE_ANALYTICS_HASH_RE.test(key)) {
+        hashParams.delete(key);
+        hashChanged = true;
+      }
+    }
+    if (!hashChanged) return null;
+    const rebuilt = hashParams.toString();
+    return rebuilt ? `${head}?${rebuilt}` : head;
+  }
+  // No '?' — OAuth implicit-flow style `#access_token=..&token_type=..`.
+  if (!fragment.includes('=') && !fragment.includes('&')) {
+    return SENSITIVE_ANALYTICS_HASH_RE.test(fragment) ? '' : null;
+  }
+  const hashParams = new URLSearchParams(fragment);
+  let hashChanged = false;
+  for (const key of [...hashParams.keys()]) {
+    if (SENSITIVE_ANALYTICS_QUERY_RE.test(key) || SENSITIVE_ANALYTICS_HASH_RE.test(key)) {
+      hashParams.delete(key);
+      hashChanged = true;
+    }
+  }
+  return hashChanged ? hashParams.toString() : null;
+}
 
 export function redactAnalyticsUrl(event: BeforeSendEvent): BeforeSendEvent {
   const raw = event.url;
@@ -118,33 +177,11 @@ export function redactAnalyticsUrl(event: BeforeSendEvent): BeforeSendEvent {
   } catch {
     return event;
   }
-  let changed = false;
-  for (const key of [...parsed.searchParams.keys()]) {
-    if (SENSITIVE_ANALYTICS_QUERY_RE.test(key)) {
-      parsed.searchParams.delete(key);
-      changed = true;
-    }
-  }
+  let changed = scrubUrlSearchParams(parsed, SENSITIVE_ANALYTICS_QUERY_RE);
   if (parsed.hash) {
-    const fragment = parsed.hash.slice(1);
-    const [head, ...rest] = fragment.split('?');
-    const hashQuery = rest.join('?');
-    if (hashQuery) {
-      const hashParams = new URLSearchParams(hashQuery);
-      let hashChanged = false;
-      for (const key of [...hashParams.keys()]) {
-        if (SENSITIVE_ANALYTICS_QUERY_RE.test(key) || SENSITIVE_ANALYTICS_HASH_RE.test(key)) {
-          hashParams.delete(key);
-          hashChanged = true;
-        }
-      }
-      if (hashChanged) {
-        const rebuilt = hashParams.toString();
-        parsed.hash = rebuilt ? `#${head}?${rebuilt}` : `#${head}`;
-        changed = true;
-      }
-    } else if (SENSITIVE_ANALYTICS_HASH_RE.test(fragment)) {
-      parsed.hash = '';
+    const scrubbed = scrubHashFragment(parsed.hash.slice(1));
+    if (scrubbed !== null) {
+      parsed.hash = scrubbed ? `#${scrubbed}` : '';
       changed = true;
     }
   }
@@ -153,11 +190,14 @@ export function redactAnalyticsUrl(event: BeforeSendEvent): BeforeSendEvent {
 }
 
 /**
- * Strip sensitive query params from the live URL at startup — runs from
- * main.ts before analytics/RUM init, not after App.init's network awaits.
- * Deferred consumers (handleCheckoutReturn, captureReferralFromUrl, the
- * Business Pro invite acceptor in App.ts) still delete their own params;
- * this is the early backstop so RUM pageviews can never carry them.
+ * Strip unread secret params from the live URL at startup — runs from main.ts
+ * before analytics/RUM init, not after App.init's network awaits. Only keys
+ * no deferred consumer reads (STRIPPABLE_AT_BOOT_RE): referral codes,
+ * checkout-intent params, invite tokens, and Dodo IDs must survive until
+ * captureReferralFromUrl / capturePendingCheckoutIntentFromUrl / the invite
+ * acceptor / handleCheckoutReturn run, and those consumers delete their own
+ * params afterwards. This is the early backstop so RUM pageviews can never
+ * carry the unread secrets; the per-event beforeSend above covers the rest.
  */
 export function stripSensitiveParamsFromUrl(): void {
   if (typeof window === 'undefined') return;
@@ -167,10 +207,11 @@ export function stripSensitiveParamsFromUrl(): void {
   } catch {
     return;
   }
-  let changed = false;
-  for (const key of [...url.searchParams.keys()]) {
-    if (SENSITIVE_ANALYTICS_QUERY_RE.test(key)) {
-      url.searchParams.delete(key);
+  let changed = scrubUrlSearchParams(url, STRIPPABLE_AT_BOOT_RE);
+  if (url.hash) {
+    const scrubbed = scrubHashFragment(url.hash.slice(1));
+    if (scrubbed !== null) {
+      url.hash = scrubbed ? `#${scrubbed}` : '';
       changed = true;
     }
   }

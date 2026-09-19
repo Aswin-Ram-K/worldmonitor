@@ -734,16 +734,17 @@ export function exportCountryBriefCSV(data: CountryBriefExport): void {
 
 /**
  * OWASP CSV Injection guard: a quoted cell that still starts with =, +, -,
- * @, tab, or CR is treated as a formula by Excel, LibreOffice, and Sheets.
- * Quoting/escaping embedded quotes is not enough for third-party RSS/intel
- * strings and user-typed monitor keywords, so prefix the dangerous first
- * character with a single quote (the standard spreadsheet escape, inert for
- * legitimate text). Runs before quoting so the quote wraps the escaped value.
+ * @, tab, CR, LF, or | is treated as a formula/DDE by Excel, LibreOffice,
+ * and Sheets. Quoting/escaping embedded quotes is not enough for
+ * third-party RSS/intel strings and user-typed monitor keywords, so prefix
+ * the dangerous first character with a single quote (the standard
+ * spreadsheet escape, inert for legitimate text). Runs before quoting so
+ * the quote wraps the escaped value.
  */
-const CSV_FORMULA_PREFIX_RE = /^[=+\-@\t\r]/;
+const CSV_FORMULA_PREFIX_RE = /^[=+\-@\t\r\n|]/;
 
-export function sanitizeCsvField(value: string): string {
-  const text = value || '';
+export function sanitizeCsvField(value: string | null | undefined): string {
+  const text = value == null ? '' : String(value);
   return CSV_FORMULA_PREFIX_RE.test(text) ? `'${text}` : text;
 }
 
