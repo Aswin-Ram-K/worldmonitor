@@ -21,9 +21,25 @@ import type { BootstrapTransferRumSample } from './bootstrap-transfer-rum';
 
 type DebugBearRumEvent =
   | ['presampling', number]
-  | ['error' | 'unhandledrejection', Event]
+  | ['error' | 'unhandledrejection', DebugBearRumErrorSnapshot]
   | ['metric1' | 'metric2' | 'metric3', number]
   | ['tag1' | 'tag2' | 'tag3', string];
+
+/** Primitive snapshot of an error event. The vendor queue must never retain
+ * live Event/Error/DOM references — only the fields triage needs. */
+export interface DebugBearRumErrorSnapshot {
+  type: string;
+  message: string;
+  filename: string;
+  lineno: number;
+  colno: number;
+  reason: string;
+}
+
+/** Same bound as the sibling Sentry pre-init queue in sentry-defer.ts: an
+ * adversarial extension or noisy error loop must not grow the vendor array
+ * without bound while the CDN script is blocked or after it drains the queue. */
+export const DEBUGBEAR_RUM_ERROR_QUEUE_MAX = 50;
 
 declare global {
   interface Window {
@@ -42,9 +58,9 @@ export function isDebugBearRumScriptFrame(filename: string): boolean {
   return filename.endsWith(DEBUGBEAR_RUM_SCRIPT_PATHNAME) || /debugbear/i.test(filename);
 }
 
-function loadDebugBearRumScript(): void {
-  if (typeof document === 'undefined') return;
-  if (document.querySelector<HTMLScriptElement>(`script[src="${DEBUGBEAR_RUM_SCRIPT_SRC}"]`)) return;
+function loadDebugBearRumScript(): HTMLScriptElement | null {
+  if (typeof document === 'undefined') return null;
+  if (document.querySelector<HTMLScriptElement>(`script[src="${DEBUGBEAR_RUM_SCRIPT_SRC}"]`)) return null;
 
   const script = document.createElement('script');
   script.async = true;
@@ -53,6 +69,7 @@ function loadDebugBearRumScript(): void {
     script.fetchPriority = 'low';
   }
   document.head.appendChild(script);
+  return script;
 }
 
 export function initDebugBearRum(): void {
@@ -65,13 +82,58 @@ export function initDebugBearRum(): void {
   window.dbbRum = queue;
   queue.push(['presampling', DEBUGBEAR_RUM_SAMPLE_RATE]);
 
-  for (const type of ['error', 'unhandledrejection'] as const) {
-    window.addEventListener(type, (event) => {
-      queue.push([type, event]);
-    });
-  }
+  const onRumError = (event: Event): void => {
+    pushBounded(queue, ['error', snapshotRumError(event)]);
+  };
+  const onRumRejection = (event: Event): void => {
+    pushBounded(queue, ['unhandledrejection', snapshotRumError(event)]);
+  };
+  window.addEventListener('error', onRumError);
+  window.addEventListener('unhandledrejection', onRumRejection);
 
-  loadDebugBearRumScript();
+  const script = loadDebugBearRumScript();
+  // Detach the buffering listeners once the vendor script loads — its own
+  // handlers own error capture from there on — and also on load failure
+  // (adblock/CDN outage) so a page-lifetime push path into a stale array
+  // never stays attached. reportBootstrapTransferRum keeps working: it
+  // writes metrics/tags directly, not through these listeners.
+  const teardown = (): void => {
+    window.removeEventListener('error', onRumError);
+    window.removeEventListener('unhandledrejection', onRumRejection);
+  };
+  script?.addEventListener?.('load', teardown, { once: true });
+  script?.addEventListener?.('error', teardown, { once: true });
+}
+
+function pushBounded(queue: DebugBearRumEvent[], entry: DebugBearRumEvent): void {
+  // Drop-oldest across the whole vendor array so presampling + transfer
+  // metrics survive while a noisy loop churns error snapshots. The array is
+  // the vendor's protocol buffer, so evict rather than refuse.
+  if (queue.length >= DEBUGBEAR_RUM_ERROR_QUEUE_MAX) queue.shift();
+  queue.push(entry);
+}
+
+export function snapshotRumError(event: Event): DebugBearRumErrorSnapshot {
+  const asRecord = event as unknown as Record<string, unknown>;
+  const reason = asRecord['reason'];
+  const error = asRecord['error'];
+  const readString = (value: unknown): string =>
+    typeof value === 'string' ? value.slice(0, 500) : '';
+  const readNumber = (value: unknown): number =>
+    typeof value === 'number' && Number.isFinite(value) ? value : 0;
+  return {
+    type: typeof event.type === 'string' ? event.type.slice(0, 32) : 'error',
+    message: readString(asRecord['message'])
+      || (error instanceof Error ? error.message.slice(0, 500) : ''),
+    filename: readString(asRecord['filename']),
+    lineno: readNumber(asRecord['lineno']),
+    colno: readNumber(asRecord['colno']),
+    reason: reason instanceof Error
+      ? reason.message.slice(0, 500)
+      : reason === undefined || reason === null
+        ? ''
+        : String(reason).slice(0, 500),
+  };
 }
 
 export function isDebugBearRumActive(): boolean {

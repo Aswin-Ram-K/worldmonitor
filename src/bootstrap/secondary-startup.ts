@@ -1,4 +1,5 @@
 import { scheduleAfterFirstPaint } from '@/utils/after-paint';
+import type { BeforeSendEvent } from '@vercel/analytics';
 
 let vercelAnalyticsScheduled = false;
 let dashboardFontsScheduled = false;
@@ -84,11 +85,106 @@ export function initVercelAnalytics(): void {
     void import('@vercel/analytics')
       .then(({ inject }) => {
         inject({
-          beforeSend: (event) => (Math.random() > 0.1 ? null : event),
+          beforeSend: (event) => {
+            const redacted = redactAnalyticsUrl(event);
+            // Sampling is a cost control, not a privacy control — the
+            // redaction above must hold for every sampled event.
+            return Math.random() > 0.1 ? null : redacted;
+          },
         });
       })
       .catch(() => {
         // Analytics is best-effort. Ad blockers/offline users should not affect boot.
       });
   }, 3000);
+}
+
+/**
+ * Query keys that must never reach Vercel Analytics: checkout/provisioning
+ * secrets, the Business Pro invite token, referral codes, Clerk handshake
+ * material, and checkout-funnel params (discount/referral codes). Vercel's
+ * beforeSend exists to redact event.url before ingest; sampling does not.
+ */
+const SENSITIVE_ANALYTICS_QUERY_RE = /^(token|accept-business-invite|email|license_key|licensekey|subscription_id|payment_id|ref|wm_referral|checkoutproduct|checkoutreferral|checkoutdiscount|checkout_product|checkout_referral|checkout_discount|__clerk_handshake|__clerk_ticket|__clerk_created|__clerk_status|affonso_referral|discount|coupon|promo|voucher)$/i;
+
+const SENSITIVE_ANALYTICS_HASH_RE = /^(token|access_token|id_token|__clerk_handshake|__clerk_ticket|email|license_key)$/i;
+
+export function redactAnalyticsUrl(event: BeforeSendEvent): BeforeSendEvent {
+  const raw = event.url;
+  if (typeof raw !== 'string' || raw.length === 0) return event;
+  let parsed: URL;
+  try {
+    parsed = new URL(raw, 'http://localhost');
+  } catch {
+    return event;
+  }
+  let changed = false;
+  for (const key of [...parsed.searchParams.keys()]) {
+    if (SENSITIVE_ANALYTICS_QUERY_RE.test(key)) {
+      parsed.searchParams.delete(key);
+      changed = true;
+    }
+  }
+  if (parsed.hash) {
+    const fragment = parsed.hash.slice(1);
+    const [head, ...rest] = fragment.split('?');
+    const hashQuery = rest.join('?');
+    if (hashQuery) {
+      const hashParams = new URLSearchParams(hashQuery);
+      let hashChanged = false;
+      for (const key of [...hashParams.keys()]) {
+        if (SENSITIVE_ANALYTICS_QUERY_RE.test(key) || SENSITIVE_ANALYTICS_HASH_RE.test(key)) {
+          hashParams.delete(key);
+          hashChanged = true;
+        }
+      }
+      if (hashChanged) {
+        const rebuilt = hashParams.toString();
+        parsed.hash = rebuilt ? `#${head}?${rebuilt}` : `#${head}`;
+        changed = true;
+      }
+    } else if (SENSITIVE_ANALYTICS_HASH_RE.test(fragment)) {
+      parsed.hash = '';
+      changed = true;
+    }
+  }
+  if (!changed) return event;
+  return { ...event, url: parsed.toString().replace(/^http:\/\/localhost/, '') || '/' };
+}
+
+/**
+ * Strip sensitive query params from the live URL at startup — runs from
+ * main.ts before analytics/RUM init, not after App.init's network awaits.
+ * Deferred consumers (handleCheckoutReturn, captureReferralFromUrl, the
+ * Business Pro invite acceptor in App.ts) still delete their own params;
+ * this is the early backstop so RUM pageviews can never carry them.
+ */
+export function stripSensitiveParamsFromUrl(): void {
+  if (typeof window === 'undefined') return;
+  let url: URL;
+  try {
+    url = new URL(window.location.href);
+  } catch {
+    return;
+  }
+  let changed = false;
+  for (const key of [...url.searchParams.keys()]) {
+    if (SENSITIVE_ANALYTICS_QUERY_RE.test(key)) {
+      url.searchParams.delete(key);
+      changed = true;
+    }
+  }
+  if (!changed) return;
+  const clean = url.pathname
+    + (url.searchParams.toString() ? `?${url.searchParams.toString()}` : '')
+    + url.hash;
+  try {
+    window.history.replaceState({}, '', clean);
+  } catch {
+    // History API unavailable (extreme embed/iframe cases).
+  }
+}
+
+export function resetVercelAnalyticsForTesting(): void {
+  vercelAnalyticsScheduled = false;
 }
