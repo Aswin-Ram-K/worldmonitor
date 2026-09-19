@@ -116,6 +116,19 @@ import {
 const RSS_ACCEPT = 'application/rss+xml, application/xml, text/xml, */*';
 
 const VALID_VARIANTS = new Set(['full', 'tech', 'finance', 'happy', 'commodity']);
+// Two-letter ISO 639-1 codes the dashboard UI can actually request: the client
+// sends getCurrentLanguage() (the catalogue base, so zh-TW arrives as zh) and
+// the in-catalogue feed lang set from _feeds.ts — a superset of the UI list
+// the catalog can serve. Anything outside this set is not a UI locale; unknown
+// codes are still shaped [a-z]{2} by validation but SHARE the en shard (a
+// full cold rebuild per code would multiply origin CPU, outbound RSS traffic,
+// and 126KB Redis payloads per sprayed lang).
+const SUPPORTED_DIGEST_LANGS = new Set([
+  'en', 'bg', 'cs', 'fr', 'de', 'el', 'es', 'hr', 'hu', 'it', 'pl', 'pt', 'nl',
+  'sv', 'ru', 'uk', 'ar', 'fa', 'zh', 'ja', 'ko', 'ro', 'tr', 'th', 'vi', 'hi', 'sw',
+]);
+const DEFAULT_DIGEST_LANG = 'en';
+const ISOLATE_FALLBACK_MAX_KEYS = 50;
 const fallbackDigestCache = new Map<string, { data: ListFeedDigestResponse; ts: number }>();
 const ITEMS_PER_FEED = 5;
 const COUNTRY_ITEMS_PER_FEED = 20;
@@ -1886,10 +1899,13 @@ export async function listFeedDigest(
   req: ListFeedDigestRequest,
 ): Promise<ListFeedDigestResponse> {
   const variant = VALID_VARIANTS.has(req.variant) ? req.variant : 'full';
-  const lang = req.lang === undefined || req.lang === '' ? 'en' : req.lang;
-  if (typeof lang !== 'string' || lang.length !== 2 || !/^[a-z]{2}$/.test(lang)) {
+  const rawLang = req.lang === undefined || req.lang === '' ? 'en' : req.lang;
+  if (typeof rawLang !== 'string' || rawLang.length !== 2 || !/^[a-z]{2}$/.test(rawLang)) {
     throw new ValidationError([{ field: 'lang', description: 'must be a lowercase two-letter language code' }]);
   }
+  // Unknown-but-well-formed codes share the default shard so spraying langs
+  // cannot multiply cache cardinality, cold rebuilds, or isolate entries.
+  const lang = SUPPORTED_DIGEST_LANGS.has(rawLang) ? rawLang : DEFAULT_DIGEST_LANG;
 
   const digestCacheKey = `news:digest:v1:${variant}:${lang}`;
   const fallbackKey = `${variant}:${lang}`;
@@ -2133,7 +2149,16 @@ export async function listFeedDigest(
       return await serveDegraded('empty-rebuild', leaderFailure, source !== 'cache');
     }
 
-    if (fallbackDigestCache.size > 50) fallbackDigestCache.clear();
+    // LRU eviction: spraying langs must not wipe the warm high-traffic keys
+    // (e.g. full:en) that degraded serving relies on when Redis is unreadable.
+    // Map preserves insertion order, so the first key is the least-recently-used;
+    // re-insert the touched key so a hit refreshes its recency.
+    if (!fallbackDigestCache.has(fallbackKey) && fallbackDigestCache.size >= ISOLATE_FALLBACK_MAX_KEYS) {
+      const oldest = fallbackDigestCache.keys().next();
+      if (!oldest.done) fallbackDigestCache.delete(oldest.value);
+    } else {
+      fallbackDigestCache.delete(fallbackKey);
+    }
     // Anchor the isolate entry to the CONTENT clock, exactly like acceptedAt:
     // stamping Date.now() re-aged unchanged content on every cache hit, so a
     // steadily-hit digest never expired from this tier and a later replay

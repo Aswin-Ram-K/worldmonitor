@@ -400,6 +400,12 @@ export const ENDPOINT_RATE_POLICIES: Record<string, EndpointRatePolicy> = {
   // unbounded (any ticker/name/domain), so these cannot inherit the fail-open
   // global fallback. Same 30/min provider-proxy budget as the sanctions lookup
   // and batch fan-out routes above.
+  // list-feed-digest fans out to 20 concurrent RSS fetches on a cache miss and
+  // keys digests by caller-controlled variant/lang, so it inherits neither the
+  // global fail-open fallback nor the unsupported-lang cardinality it used to
+  // carry (unknown langs now share the en shard server-side). Same 30/min
+  // provider-proxy budget as the other RSS fan-out routes above.
+  '/api/news/v1/list-feed-digest': { limit: 30, window: '60 s' },
   // Country coverage (#7526) fans out per cache miss to two Google News RSS
   // feeds plus a live military-flights path and an ACLED window whose cache key
   // moves with the clock, so the miss rate is high. Same shape as the sibling
@@ -618,6 +624,9 @@ export const FAIL_CLOSED_ENDPOINT_RATE_POLICY_REQUIRED: Record<string, RateLimit
   },
   '/api/intelligence/v1/get-country-coverage': {
     reason: 'Country coverage fans out to two Google News feeds and the live military-flights path on cache miss.',
+  },
+  '/api/news/v1/list-feed-digest': {
+    reason: 'Digest rebuilds fan out to 20 concurrent RSS fetches on cache miss with caller-controlled variant/lang cardinality.',
   },
   '/api/intelligence/v1/get-company-enrichment': {
     reason: 'Per-company composite fans out to SEC EDGAR and Finnhub on cache miss.',

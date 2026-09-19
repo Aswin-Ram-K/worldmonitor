@@ -406,7 +406,7 @@ describe('durable last-good wiring (#7084)', () => {
   });
 
   it('preserves default English and two-letter language cache scopes', async () => {
-    for (const lang of [undefined, '', 'en', 'ar', 'fr', 'zh', 'ja', 'sw', 'xx']) {
+    for (const lang of [undefined, '', 'en', 'ar', 'fr', 'zh', 'ja', 'sw']) {
       reset();
       const data = body(['https://a/1'], COVERAGE);
       stub.fetchMeta = { data, source: 'cache', leader: false };
@@ -414,6 +414,34 @@ describe('durable last-good wiring (#7084)', () => {
       assert.deepEqual(stub.fetchKeys, [`news:digest:v1:full:${lang || 'en'}`]);
       assert.deepEqual(result.categories, data.categories);
     }
+  });
+
+  it('shards unknown-but-well-formed languages onto the default English digest', async () => {
+    // lang=zz still passes shape validation but must not mint its own cache
+    // keys, coverage ledgers, or isolate entries — it shares the en shard.
+    for (const lang of ['xx', 'zz', 'qq']) {
+      reset();
+      const data = body(['https://a/1'], COVERAGE);
+      stub.fetchMeta = { data, source: 'cache', leader: false };
+      const result = await mod.listFeedDigest(ctx(), { variant: 'full', lang });
+      assert.deepEqual(stub.fetchKeys, ['news:digest:v1:full:en']);
+      assert.deepEqual(result.categories, data.categories);
+    }
+  });
+
+  it('evicts the least-recently-used isolate entry instead of wiping the cache', async () => {
+    // Fill the isolate tier to capacity, then trigger one more write: the
+    // warm full:en entry must survive while the oldest key is evicted.
+    reset();
+    stub.fetchMeta = { data: body(['https://a/1'], COVERAGE), source: 'cache', leader: false };
+    const cache = mod.__testing__.fallbackDigestCache;
+    for (let i = 0; i < 50; i++) {
+      cache.set(`full:l${String(i).padStart(2, '0')}`, { data: body([`https://a/${i}`], COVERAGE), ts: NOW });
+    }
+    assert.equal(cache.size, 50);
+    await mod.listFeedDigest(ctx(), { variant: 'full', lang: 'en' });
+    assert.equal(cache.size, 50);
+    assert.ok(cache.has('full:en'), 'the high-traffic full:en entry must survive eviction');
   });
 
   it('a genuine MISS publishes through one atomic guarded write', async () => {
