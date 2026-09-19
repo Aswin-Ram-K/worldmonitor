@@ -4,9 +4,12 @@
  * The generic REST batch endpoint (POST /api/batch/v1/execute): agents acting
  * on many items send an array of operations instead of looping single calls.
  * Each operation is re-dispatched as a same-origin GET through the public
- * gateway, so per-endpoint auth, entitlements, rate limits, caching, and usage
- * telemetry all apply to every sub-request exactly as if it were sent directly
- * (a batch is a transport optimization, not a quota bypass).
+ * gateway, so per-endpoint auth, entitlements, caching, and usage telemetry
+ * all apply to every sub-request exactly as if it were sent directly (a batch
+ * is a transport optimization, not a quota bypass). Rate limits are the one
+ * control the re-dispatch cannot inherit — the gateway would key them to the
+ * platform's egress IP — so each operation is charged to the CALLER's own
+ * budget here, before dispatch (see chargeCaller).
  */
 
 import type {
@@ -22,6 +25,13 @@ import {
   ApiError,
   ValidationError,
 } from '../../../../src/generated/server/worldmonitor/batch/v1/service_server';
+import type { EndpointRateLimitOptions } from '../../../_shared/rate-limit';
+import {
+  checkEndpointRateLimit,
+  checkRateLimit,
+  hasEndpointRatePolicy,
+} from '../../../_shared/rate-limit';
+import { TRUSTED_USER_ID_HEADER } from '../../../_shared/mcp-internal-hmac';
 
 export const MAX_BATCH_OPERATIONS = 20;
 export const MAX_OPERATION_ID_LENGTH = 64;
@@ -132,6 +142,57 @@ function buildSubRequestHeaders(inbound: Headers): Headers {
   return headers;
 }
 
+/**
+ * Rate-limit identity of the BATCH CALLER, mirroring the gateway's own
+ * attribution so a batched operation charges the same bucket a direct call
+ * would: a validated wm_ user key is scoped `api_key`, any other
+ * gateway-authenticated principal is the session, and everything else falls
+ * back to the caller's IP inside the limiter.
+ */
+function callerRateLimitOptions(inbound: Headers): EndpointRateLimitOptions {
+  const principalUserId = inbound.get(TRUSTED_USER_ID_HEADER);
+  if (!principalUserId) return {};
+  const wmKey = inbound.get('x-worldmonitor-key') ?? inbound.get('x-api-key') ?? '';
+  return { principalUserId, principalScope: wmKey.startsWith('wm_') ? 'api_key' : 'session' };
+}
+
+/**
+ * Charges one sub-operation against the batch caller's own budget BEFORE it is
+ * dispatched. Sub-requests are re-dispatched as same-origin GETs, so the
+ * gateway re-derives their identity from the platform's fetch egress IP — a
+ * bucket the caller does not own. Without this pre-charge a single batch buys
+ * up to MAX_BATCH_OPERATIONS endpoint admissions that never touch the caller's
+ * per-IP/per-principal budget, which is exactly the "each operation is
+ * rate-limited as if sent directly" contract this endpoint publishes.
+ *
+ * Refusals are returned as the sub-result the caller would have received had
+ * the operation been sent directly (429, or 503 when the limiter itself is
+ * unavailable and the endpoint policy fails closed), and the operation is not
+ * dispatched.
+ */
+async function chargeCaller(
+  op: ValidatedOperation,
+  inbound: Request,
+  opts: EndpointRateLimitOptions,
+): Promise<BatchOperationResult | null> {
+  if (!op.target) return null;
+  const pathname = op.target.pathname;
+  // Mirror the gateway's two-phase order: an explicit endpoint policy governs
+  // the path on its own; everything else charges the global per-IP fallback.
+  const refusal = hasEndpointRatePolicy(pathname)
+    ? await checkEndpointRateLimit(inbound, pathname, {}, opts)
+    : await checkRateLimit(inbound, {}, opts);
+  if (!refusal) return null;
+
+  let body: unknown;
+  try {
+    body = await refusal.json();
+  } catch {
+    body = {};
+  }
+  return { id: op.id, status: refusal.status, body: body as BatchOperationBody, error: '' };
+}
+
 async function runOperation(
   op: ValidatedOperation,
   headers: Headers,
@@ -209,8 +270,12 @@ export function createExecuteBatch(
     }
 
     const headers = buildSubRequestHeaders(ctx.request.headers);
+    const rateLimitOpts = callerRateLimitOptions(ctx.request.headers);
     const results = await Promise.all(
-      validated.map((op) => runOperation(op, headers, fetchImpl)),
+      validated.map(async (op) => {
+        const refused = await chargeCaller(op, ctx.request, rateLimitOpts);
+        return refused ?? runOperation(op, headers, fetchImpl);
+      }),
     );
 
     const succeeded = results.filter((r) => r.status >= 200 && r.status < 300 && !r.error).length;
