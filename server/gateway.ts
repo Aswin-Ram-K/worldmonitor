@@ -801,13 +801,13 @@ function withAuthenticatedUserId(request: Request, userId: string): Request {
 // same bucket a direct call would instead of guessing from raw credentials.
 function withTrustedRateLimitPrincipal(
   request: Request,
-  principalUserId: string,
+  userId: string,
   scope: 'session' | 'api_key',
 ): Request {
   const headers = new Headers(request.headers);
   headers.set(
     TRUSTED_RATE_LIMIT_PRINCIPAL_HEADER,
-    formatTrustedRateLimitPrincipal(principalUserId, scope),
+    formatTrustedRateLimitPrincipal(userId, scope),
   );
   return cloneRequestWithHeaders(request, headers);
 }
