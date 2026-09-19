@@ -158,6 +158,13 @@ function findEndpointRateLimitFailOpenOptOuts() {
   // FAIL_CLOSED_ENDPOINT_RATE_POLICY_REQUIRED. Its helper still exposes an
   // escape hatch for tests/backcompat, but production runtime callers must not
   // pass `{ failClosed: false }` and silently nullify the registry.
+  //
+  // One sanctioned exception: server/gateway.ts applies `{ failClosed: false }`
+  // to the anonymous public=1 CDN-shielded SHAPE only (caller-invariant public
+  // RPCs such as list-feed-digest?variant=full&lang=en&public=1 must keep
+  // serving from CDN when Redis is down — failing closed there 503s the exact
+  // traffic the shield exists for). The call site carries a marker comment;
+  // anything else opting out is a finding.
   const findings = [];
   const callWithFailOpenOptOut =
     /checkEndpointRateLimit\s*\([\s\S]*?\{[\s\S]*?failClosed\s*:\s*false[\s\S]*?\}\s*\)/g;
@@ -168,7 +175,19 @@ function findEndpointRateLimitFailOpenOptOuts() {
       const src = readFileSync(file, 'utf8');
       if (!src.includes('checkEndpointRateLimit') || !src.includes('failClosed')) continue;
       for (const match of src.matchAll(callWithFailOpenOptOut)) {
+        const matchEndLine = src.slice(0, match.index + match[0].length).split('\n').length;
         const line = src.slice(0, match.index).split('\n').length;
+        // The sanctioned gateway public-shape opt-out carries its marker
+        // comment on the surrounding lines; anything else is a finding. Match
+        // windows around the whole call (start and end): the regex is
+        // non-greedy across calls, so a match can START far above the
+        // failClosed:false literal it ends at.
+        const lines = src.split('\n');
+        const context = [
+          ...lines.slice(Math.max(0, line - 12), line),
+          ...lines.slice(matchEndLine - 1, matchEndLine + 6),
+        ].join('\n');
+        if (file.endsWith('server/gateway.ts') && context.includes('sanctioned failClosed')) continue;
         findings.push(`${toRepoRelativePath(file)}:${line}`);
       }
     }

@@ -401,10 +401,15 @@ export const ENDPOINT_RATE_POLICIES: Record<string, EndpointRatePolicy> = {
   // global fallback. Same 30/min provider-proxy budget as the sanctions lookup
   // and batch fan-out routes above.
   // list-feed-digest fans out to 20 concurrent RSS fetches on a cache miss and
-  // keys digests by caller-controlled variant/lang, so it inherits neither the
-  // global fail-open fallback nor the unsupported-lang cardinality it used to
-  // carry (unknown langs now share the en shard server-side). Same 30/min
+  // keys digests by caller-controlled variant/lang, so it must not inherit the
+  // global fail-open fallback when Redis is reachable (unknown langs now share
+  // the en shard server-side, bounding that cardinality). Same 30/min
   // provider-proxy budget as the other RSS fan-out routes above.
+  //
+  // Anonymous public=1 CDN-shielded reads must keep working when Redis is
+  // DOWN: the public shape is caller-invariant and served from CDN, so the
+  // gateway passes failClosed: false for that shape (see the call site) and a
+  // Redis outage serves the CDN path instead of 503ing public traffic.
   '/api/news/v1/list-feed-digest': { limit: 30, window: '60 s' },
   // Country coverage (#7526) fans out per cache miss to two Google News RSS
   // feeds plus a live military-flights path and an ACLED window whose cache key

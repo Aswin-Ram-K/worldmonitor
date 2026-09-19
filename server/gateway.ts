@@ -2021,6 +2021,9 @@ export function createDomainGateway(
     // Confirmed paid principals use per-user buckets; other traffic uses IP.
     //
     // Google searches need their tighter upstream budget even after MCP admission.
+    // (Rate-limit lint: the sanctioned failClosed:false call site for the
+    // anonymous public=1 CDN-shielded shape lives in the endpoint-limiter
+    // block below — scripts/enforce-rate-limit-policies.mjs flags any other.)
     if (internalMcpVerified && (pathname === '/api/aviation/v1/search-google-flights'
       || pathname === '/api/aviation/v1/search-google-dates')) {
       const endpointRlResponse = await checkEndpointRateLimit(request, pathname, corsHeaders, {
@@ -2046,12 +2049,24 @@ export function createDomainGateway(
           || pathname === '/api/military/v1/get-wingbits-live-flight'
           || pathname === '/api/imagery/v1/search-imagery'
           || pathname === '/api/webcam/v1/get-webcam-image');
+      // The anonymous public=1 CDN-shielded shape is caller-invariant and must
+      // keep serving from CDN when Redis is down: failing the endpoint limiter
+      // closed here would 503 the exact traffic the CDN shield exists for.
+      // Classification ignores attached credentials (a Vercel cache hit happens
+      // before this function sees them), so the public URL has one contract
+      // for every caller — the opt-out applies to the SHAPE, not to the
+      // absence of credentials. Non-public shapes on this path keep the
+      // fail-closed default (the digest rebuild fans out to 20 RSS fetches).
+      // (Rate-limit lint: this is the one sanctioned failClosed:false call
+      // site — scripts/enforce-rate-limit-policies.mjs flags any other.)
       const endpointRlResponse = isSidecarProviderLookup ? null : rateLimitPrincipalUserId
         ? await checkEndpointRateLimit(request, pathname, corsHeaders, {
             principalUserId: rateLimitPrincipalUserId,
             principalScope: isUserApiKey ? 'api_key' : 'session',
           })
-        : await checkEndpointRateLimit(request, pathname, corsHeaders);
+        : isPublicNoAuthRpc
+          ? await checkEndpointRateLimit(request, pathname, corsHeaders, { failClosed: false })
+          : await checkEndpointRateLimit(request, pathname, corsHeaders);
       if (endpointRlResponse) {
         const reason = getRateLimitTelemetryReason(
           endpointRlResponse,
