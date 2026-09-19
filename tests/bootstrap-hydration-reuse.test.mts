@@ -16,7 +16,10 @@ import { readFileSync } from 'node:fs';
 
 type Harness = {
   fetchBootstrapData: () => Promise<void>;
-  bootstrapTesting: { resetBootstrapForTests: () => void };
+  bootstrapTesting: {
+    resetBootstrapForTests: () => void;
+    seedHydrationCacheForTests: (data: Record<string, unknown>) => void;
+  };
   fetchNaturalEvents: () => Promise<Array<{ id: string; title: string }>>;
   fetchAllFires: () => Promise<{ totalCount: number; regions?: Record<string, unknown[]>; skipped?: boolean }>;
   fetchEarthquakes: () => Promise<Array<{ id: string }>>;
@@ -31,6 +34,12 @@ type Harness = {
   fetchTrafficAnomalies: (country?: string) => Promise<{ anomalies: Array<{ id: string }>; totalCount: number }>;
   fetchSocialVelocity: () => Promise<{ posts: Array<{ id: string }>; fetchedAt: number }>;
   fetchDiseaseOutbreaks: () => Promise<{ outbreaks: Array<{ id: string }>; fetchedAt: number }>;
+  fetchImdCycloneMarine: () => Promise<{
+    coverageState: string;
+    cycloneEvents: Array<{ id: string }>;
+    portAlerts: Array<{ id: string }>;
+    marineBulletins: Array<{ id: string }>;
+  }>;
   fetchSanctionsPressure: () => Promise<{
     totalCount: number;
     semaError: string | null;
@@ -201,6 +210,7 @@ before(async () => {
         "export { fetchTrafficAnomalies } from './src/services/infrastructure/index.ts';",
         "export { fetchSocialVelocity } from './src/services/social-velocity.ts';",
         "export { fetchDiseaseOutbreaks } from './src/services/disease-outbreaks.ts';",
+        "export { fetchImdCycloneMarine } from './src/services/imd-cyclone-marine.ts';",
         "export { fetchSanctionsPressure } from './src/services/sanctions-pressure.ts';",
         "export { fetchPizzIntStatus } from './src/services/pizzint.ts';",
         "export { fetchChokepointStatus, refreshChokepointStatusAfterHydration } from './src/services/supply-chain/index.ts';",
@@ -420,6 +430,42 @@ describe('bootstrap hydration reuse (#7048)', () => {
       1,
       'the accepted on-demand result is retained by the delays breaker',
     );
+  });
+
+  it('imdCycloneMarine: parallel weather/natural loaders share one accepted snapshot (#8354)', async () => {
+    const snapshot = {
+      coverageState: 'ok',
+      generatedAt: Date.now(),
+      cycloneEvents: [{ id: 'imd-cyclone-1', title: 'Cyclone X', category: 'tropicalCyclone', lat: 12, lon: 80, date: new Date().toISOString(), closed: false }],
+      portAlerts: [{ id: 'imd-port-1', title: 'Port warning', severity: 'watch' }],
+      marineBulletins: [{ id: 'imd-marine-1', title: 'Sea bulletin', severity: 'advisory' }],
+      sourceName: 'India Meteorological Department',
+      sourceUrl: 'https://api.imd.gov.in/public/api_reference.html',
+    };
+    // Pre-seed the consume-once slot AFTER bootstrap hydration (which drains an
+    // empty slow deferred with {}), mirroring a tier payload or a completed
+    // on-demand read landing while both loaders are already queued.
+    const requests = bootstrapStub({});
+    await harness.fetchBootstrapData();
+    harness.bootstrapTesting.resetBootstrapForTests();
+    harness.bootstrapTesting.seedHydrationCacheForTests({ imdCycloneMarine: snapshot });
+
+    // loadNatural() and loadWeatherAlerts() both call fetchImdCycloneMarine()
+    // in the same tick; the consume-once slot drains on the first read, so the
+    // second must be served from the shared handoff with zero RPC requests.
+    const [first, second] = await Promise.all([
+      harness.fetchImdCycloneMarine(),
+      harness.fetchImdCycloneMarine(),
+    ]);
+    assert.equal(first.cycloneEvents.length, 1);
+    assert.equal(first.portAlerts.length, 1);
+    assert.equal(first.marineBulletins.length, 1);
+    assert.deepEqual(second, first, 'both layers must share one accepted snapshot');
+    assert.equal(rpcUrlCount(requests), 0, 'accepted hydration must not trigger an RPC refetch');
+
+    const third = await harness.fetchImdCycloneMarine();
+    assert.deepEqual(third, first, 'the accepted snapshot is retained for the TTL window');
+    assert.equal(rpcUrlCount(requests), 0, 'retained hydration must not trigger a second fetch');
   });
 
   it('malformed live DDoS and traffic responses use their fallbacks', async () => {
@@ -850,6 +896,22 @@ describe('bootstrap hydration reuse (#7048)', () => {
 
     const aviation = roundTrip('Flight Delays v2', [{ updatedAt: new Date(1) }]);
     assert.ok(aviation[0]?.updatedAt instanceof Date);
+
+    const ops = roundTrip('Airport Ops', [{ updatedAt: new Date(1) }]);
+    assert.ok(ops[0]?.updatedAt instanceof Date);
+
+    const prices = roundTrip('Flight Prices', {
+      quotes: [
+        { id: 'q1', expiresAt: new Date(2) },
+        { id: 'q2', expiresAt: null },
+      ],
+      isDemoMode: false, isIndicative: false, degraded: false, error: '', provider: 'x',
+    });
+    assert.ok(prices.quotes[0]?.expiresAt instanceof Date);
+    assert.equal(prices.quotes[1]?.expiresAt, null);
+
+    const news = roundTrip('Aviation News', [{ publishedAt: new Date(3) }]);
+    assert.ok(news[0]?.publishedAt instanceof Date);
 
     const pizzint = roundTrip('PizzINT', { lastUpdate: new Date(2) });
     assert.ok(pizzint.lastUpdate instanceof Date);

@@ -1,3 +1,4 @@
+import { createHydrationHandoff } from '@/services/hydration-handoff';
 import { ensureHydrated, getHydratedData } from '@/services/bootstrap';
 import type { NaturalEvent } from '@/types';
 import type { WeatherAlert } from '@/services/weather';
@@ -81,8 +82,27 @@ export function mapImdSnapshot(snapshot: ImdCycloneMarineSnapshot | null | undef
   };
 }
 
+// getHydratedData() deletes a value when read, so the first of the two
+// parallel loaders (weather + natural, data-loader.ts) drained the consume-once
+// slot and the second fell through to the on-demand fetch or EMPTY. Both
+// layers must share one accepted snapshot for the TTL window (#8354).
+const hydrationHandoff = createHydrationHandoff<ImdMappedProducts>(
+  'imdCycloneMarine',
+  (value) => {
+    const mapped = mapImdSnapshot(value as ImdCycloneMarineSnapshot | null | undefined);
+    return mapped.coverageState === 'unavailable' &&
+      mapped.cycloneEvents.length === 0 &&
+      mapped.portAlerts.length === 0 &&
+      mapped.marineBulletins.length === 0
+      ? null
+      : mapped;
+  },
+);
+
 export async function fetchImdCycloneMarine(): Promise<ImdMappedProducts> {
-  const hydrated = (getHydratedData('imdCycloneMarine') ?? await ensureHydrated('imdCycloneMarine')) as ImdCycloneMarineSnapshot | undefined;
-  if (!hydrated) return EMPTY;
-  return mapImdSnapshot(hydrated);
+  return hydrationHandoff.getOrLoad(async () => {
+    const hydrated = (getHydratedData('imdCycloneMarine') ?? await ensureHydrated('imdCycloneMarine')) as ImdCycloneMarineSnapshot | undefined;
+    if (!hydrated) return EMPTY;
+    return mapImdSnapshot(hydrated);
+  }, EMPTY);
 }

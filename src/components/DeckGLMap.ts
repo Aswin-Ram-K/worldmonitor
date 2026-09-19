@@ -886,6 +886,7 @@ export class DeckGLMap {
   private lastAircraftFetchCenter: [number, number] | null = null;
   private lastAircraftFetchZoom = -1;
   private aircraftFetchSeq = 0;
+  private basesFetchSeq = 0;
 
   constructor(container: HTMLElement, initialState: DeckMapState, options: DeckGLMapOptions = {}) {
     this.container = container;
@@ -7139,14 +7140,25 @@ export class DeckGLMap {
   private fetchServerBases(): void {
     if (!this.maplibreMap) return;
     const mapLayers = this.state.layers;
-    if (!mapLayers.bases) return;
+    // Invalidate any in-flight bases request when the layer can no longer
+    // consume it: its response must not repopulate the map after disable.
+    if (!mapLayers.bases) {
+      this.basesFetchSeq += 1;
+      return;
+    }
     const zoom = this.maplibreMap.getZoom();
-    if (zoom < 3) return;
+    if (zoom < 3) {
+      this.basesFetchSeq += 1;
+      return;
+    }
     const bounds = this.maplibreMap.getBounds();
     const sw = bounds.getSouthWest();
     const ne = bounds.getNorthEast();
+    // Generation counter: the quantized service cache coalesces per key, but
+    // a stale in-flight response must not overwrite a newer viewport (#8354).
+    const seq = ++this.basesFetchSeq;
     fetchMilitaryBases(sw.lat, sw.lng, ne.lat, ne.lng, zoom).then((result) => {
-      if (!result) return;
+      if (!result || seq !== this.basesFetchSeq) return;
       this.serverBases = result.bases;
       this.serverBaseClusters = result.clusters;
       this.serverBasesLoaded = true;
@@ -8298,6 +8310,7 @@ export class DeckGLMap {
   public destroy(): void {
     this.destroyed = true;
     this.aircraftFetchSeq += 1;
+    this.basesFetchSeq += 1;
     this.settleViewportMovement(false);
     this.stopTradeAnimation();
     this.activeFlightTrails.clear();

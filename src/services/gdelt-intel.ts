@@ -180,6 +180,9 @@ export async function fetchGdeltArticles(
     return cached.articles;
   }
 
+  // Key breaker state on the full query identity, matching this request's
+  // articleCache key — otherwise one query's payload is served for another
+  // under the breaker's shared default key (#8354).
   const resp = await gdeltBreaker.execute(async () => {
     return getClient().searchGdeltDocuments({
       query,
@@ -188,7 +191,17 @@ export async function fetchGdeltArticles(
       toneFilter: '',
       sort: '',
     });
-  }, emptyGdeltFallback);
+  }, emptyGdeltFallback, { cacheKey });
+
+  if (resp === emptyGdeltFallback) {
+    // Breaker fallback (open circuit, no per-query cache): serve only this
+    // query's own stale articles within the ceiling, and never write the
+    // fallback into articleCache.
+    if (cached && Date.now() - cached.timestamp < STALE_MAX) {
+      return cached.articles;
+    }
+    return [];
+  }
 
   if (resp.error) {
     if (resp.error === 'seed-unavailable') {
@@ -304,6 +317,9 @@ export async function fetchPositiveGdeltArticles(
     return cached.articles;
   }
 
+  // Key breaker state on the full query identity, matching this request's
+  // articleCache key — otherwise one query's payload is served for another
+  // under the breaker's shared default key (#8354).
   const resp = await positiveGdeltBreaker.execute(async () => {
     return getClient().searchGdeltDocuments({
       query,
@@ -312,7 +328,17 @@ export async function fetchPositiveGdeltArticles(
       toneFilter,
       sort,
     });
-  }, emptyGdeltFallback);
+  }, emptyGdeltFallback, { cacheKey });
+
+  if (resp === emptyGdeltFallback) {
+    // Breaker fallback (open circuit, no per-query cache): serve only this
+    // query's own stale articles within the ceiling, and never write the
+    // fallback into articleCache.
+    if (cached && Date.now() - cached.timestamp < STALE_MAX) {
+      return cached.articles;
+    }
+    return [];
+  }
 
   if (resp.error) {
     console.warn(`[GDELT-Intel] Positive RPC error: ${resp.error}`);

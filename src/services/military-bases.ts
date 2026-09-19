@@ -47,7 +47,10 @@ function entryToEnriched(e: MilitaryBaseEntry): MilitaryBaseEnriched {
 }
 
 let lastResult: CachedResult | null = null;
-let pendingFetch: Promise<CachedResult | null> | null = null;
+// In-flight fetches are coalesced per cache key: two viewports racing must
+// not share one promise, or the second viewport receives the first viewport's
+// payload (#8354).
+const pendingFetches = new Map<string, Promise<CachedResult | null>>();
 
 export type { MilitaryBaseCluster };
 
@@ -64,9 +67,9 @@ export async function fetchMilitaryBases(
     return lastResult;
   }
 
-  if (pendingFetch) return pendingFetch;
+  if (pendingFetches.has(cacheKey)) return pendingFetches.get(cacheKey)!;
 
-  pendingFetch = (async () => {
+  const pending: Promise<CachedResult | null> = (async (): Promise<CachedResult | null> => {
     try {
       const resp: ListMilitaryBasesResponse = await client.listMilitaryBases({
         swLat, swLon, neLat, neLon,
@@ -88,11 +91,17 @@ export async function fetchMilitaryBases(
       return result;
     } catch (err) {
       console.error('[bases-svc] error', err);
-      return lastResult;
+      // Key-guard the fallback: a failed fetch for this viewport must not
+      // serve another viewport's cached payload.
+      return lastResult && lastResult.cacheKey === cacheKey ? lastResult : null;
     } finally {
-      pendingFetch = null;
+      // A newer request for this same key cannot exist while ours is in
+      // flight: identical keys join our promise above instead of starting a
+      // new one, so clearing here cannot strand a sibling.
+      pendingFetches.delete(cacheKey);
     }
   })();
 
-  return pendingFetch;
+  pendingFetches.set(cacheKey, pending);
+  return pending;
 }

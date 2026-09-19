@@ -327,32 +327,56 @@ function toDisplayDatePrice(p: ProtoDatePriceEntry): DatePrice {
 // this same client (delays, ops summary, news, tracking) are unaffected.
 const client = new AviationServiceClient(getRpcBaseUrl(), { fetch: premiumFetch });
 
+function reviveDate(value: unknown): Date {
+  return value instanceof Date && !Number.isNaN(value.getTime())
+    ? value
+    : new Date(value as string | number);
+}
+
 const breakerDelays = createCircuitBreaker<AirportDelayAlert[]>({
   name: 'Flight Delays v2',
   cacheTtlMs: 2 * 60 * 60 * 1000,
   persistCache: true,
   revivePersistedData: (alerts) => alerts.map((alert) => ({
     ...alert,
-    updatedAt: alert.updatedAt instanceof Date
-      ? alert.updatedAt
-      : new Date(alert.updatedAt as unknown as string | number),
+    updatedAt: reviveDate(alert.updatedAt),
   })),
 });
-const breakerOps = createCircuitBreaker<AirportOpsSummary[]>({ name: 'Airport Ops', cacheTtlMs: 6 * 60 * 1000, persistCache: true });
+
+const breakerOps = createCircuitBreaker<AirportOpsSummary[]>({
+  name: 'Airport Ops',
+  cacheTtlMs: 6 * 60 * 1000,
+  persistCache: true,
+  revivePersistedData: (summaries) => summaries.map((summary) => ({
+    ...summary,
+    updatedAt: reviveDate(summary.updatedAt),
+  })),
+});
 type AirportFlightBoard = { flights: FlightInstance[]; source: string };
 
 const breakerFlights = createCircuitBreaker<AirportFlightBoard>({ name: 'Airport Flights', cacheTtlMs: 5 * 60 * 1000, persistCache: false });
 const breakerCarrier = createCircuitBreaker<CarrierOps[]>({ name: 'Carrier Ops', cacheTtlMs: 5 * 60 * 1000, persistCache: false });
 const breakerStatus = createCircuitBreaker<FlightInstance[]>({ name: 'Flight Status', cacheTtlMs: 6 * 60 * 1000, persistCache: false });
 const breakerTrack = createCircuitBreaker<PositionSample[]>({ name: 'Track Aircraft', cacheTtlMs: 15 * 1000, persistCache: false });
-const breakerPrices = createCircuitBreaker<{ quotes: PriceQuote[]; isDemoMode: boolean; isIndicative: boolean; degraded: boolean; error: string; provider: string }>({ name: 'Flight Prices', cacheTtlMs: 10 * 60 * 1000, persistCache: true });
+const breakerPrices = createCircuitBreaker<{ quotes: PriceQuote[]; isDemoMode: boolean; isIndicative: boolean; degraded: boolean; error: string; provider: string }>({
+  name: 'Flight Prices',
+  cacheTtlMs: 10 * 60 * 1000,
+  persistCache: true,
+  revivePersistedData: (result) => ({
+    ...result,
+    quotes: result.quotes.map((quote) => ({
+      ...quote,
+      expiresAt: quote.expiresAt === null ? null : reviveDate(quote.expiresAt),
+    })),
+  }),
+});
 const breakerNews = createCircuitBreaker<AviationNewsItem[]>({
   name: 'Aviation News',
   cacheTtlMs: 15 * 60 * 1000,
   persistCache: true,
   revivePersistedData: (items) => items.map((item) => ({
     ...item,
-    publishedAt: new Date(item.publishedAt),
+    publishedAt: reviveDate(item.publishedAt),
   })),
 });
 // No client-side cache for Google Flights search (gateway is no-store, prices change rapidly)
