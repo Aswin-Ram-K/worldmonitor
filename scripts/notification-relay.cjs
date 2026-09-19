@@ -621,6 +621,32 @@ function ensureVapidConfigured(client) {
   }
 }
 
+// Payload URLs originate from event.payload.link — published verbatim by Pro
+// accounts through /api/notify, or ingested verbatim from external RSS feeds.
+// Article links are the point of an rss_alert, so off-origin https targets
+// are kept; what must never happen is the service worker NAVIGATING the
+// user's already-open dashboard tab to one, which would replace a trusted
+// surface with a page WorldMonitor does not control. public/push-handler.js
+// owns that half: off-origin targets always get their own tab.
+//
+// The relay's half is scheme discipline — a javascript:, data: or http:
+// target must never be stored in a notification payload at all.
+const PUSH_DASHBOARD_URL = 'https://worldmonitor.app/';
+
+function safePushClickUrl(raw) {
+  if (typeof raw !== 'string' || raw.length === 0) return PUSH_DASHBOARD_URL;
+  let parsed;
+  try {
+    parsed = new URL(raw, PUSH_DASHBOARD_URL);
+  } catch {
+    return PUSH_DASHBOARD_URL;
+  }
+  if (parsed.protocol !== 'https:') return PUSH_DASHBOARD_URL;
+  // Embedded credentials exist only to make a hostile host read as ours.
+  if (parsed.username || parsed.password) return PUSH_DASHBOARD_URL;
+  return parsed.href;
+}
+
 /**
  * Deliver a web push notification to one subscription. Returns true on
  * success. On 404/410 (subscription gone) the channel is deactivated
@@ -638,7 +664,7 @@ async function sendWebPush(userId, subscription, payload) {
   const body = JSON.stringify({
     title: payload.title || 'WorldMonitor',
     body: payload.body || '',
-    url: payload.url || 'https://worldmonitor.app/',
+    url: safePushClickUrl(payload.url),
     tag: payload.tag || 'worldmonitor-generic',
     eventType: payload.eventType,
   });
@@ -1374,6 +1400,7 @@ if (require.main === module) {
 
 module.exports = {
   processEvent,
+  safePushClickUrl,
   sendTelegram,
   checkDedup,
   upstashDedupSetNx,

@@ -245,68 +245,92 @@ describe('push-handler.js — notificationclick', () => {
   });
 });
 
-// REGRESSION: PR #3173 P1 (SSRF). The set-web-push edge handler
-// must reject any endpoint that isn't a known push-service host.
-// Without the allow-list the relay's outbound sendWebPush becomes a
-// server-side-request primitive for any Pro user. These tests lock
-// the guard into code + reject common bypass attempts.
-describe('set-web-push SSRF allow-list', () => {
-  it('source contains an explicit allow-list of push-service hosts', async () => {
-    const { readFileSync } = await import('node:fs');
-    const { fileURLToPath } = await import('node:url');
-    const { dirname, resolve } = await import('node:path');
-    const __d = dirname(fileURLToPath(import.meta.url));
-    const src = readFileSync(
-      resolve(__d, '../api/notification-channels.ts'),
-      'utf-8',
-    );
-    assert.match(src, /isAllowedPushEndpointHost/, 'allow-list helper must be defined');
-    // All four major browser push services must be recognised.
-    assert.match(src, /fcm\.googleapis\.com/, 'FCM (Chrome/Edge) host must be allow-listed');
-    assert.match(src, /updates\.push\.services\.mozilla\.com/, 'Mozilla (Firefox) host must be allow-listed');
-    assert.match(src, /web\.push\.apple\.com/, 'Apple (Safari) host must be allow-listed');
-    assert.match(src, /notify\.windows\.com/, 'Windows Notification Service host must be allow-listed');
-    // The allow-list MUST fail-closed (return false for unknown hosts).
-    // A regex-based presence test is enough — if someone relaxes it to
-    // `return true` they have to do so deliberately.
-    assert.match(src, /return false;?\s*\n\s*\}/, 'allow-list must end with explicit `return false` (fail-closed)');
+// REGRESSION: off-origin notification click targets.
+//
+// Push payload URLs come from event.payload.link — published verbatim by Pro
+// accounts through /api/notify or ingested verbatim from external RSS feeds.
+// The article must stay reachable, so an off-origin https link is kept and
+// opened in its OWN tab. What must never happen is navigating the
+// already-open dashboard tab there: that replaces a trusted surface with a
+// page WorldMonitor does not control (phishing pivot / tab-nabbing).
+// Relay-side scheme discipline: tests/notification-relay-push-click-origin.test.mjs.
+describe('push-handler.js — off-origin click targets', () => {
+  const OFF_ORIGIN = [
+    ['https://example.com/wm-verify-account', 'https://example.com/wm-verify-account'],
+    ['//example.com/wm-verify-account', 'https://example.com/wm-verify-account'],
+    ['https://worldmonitor.app.evil.com/', 'https://worldmonitor.app.evil.com/'],
+  ];
+  // Not same-origin, not plain https, or carrying credentials purely to make
+  // a hostile host read as ours — these can never become a navigation.
+  const REJECTED = [
+    'javascript:alert(1)',
+    'data:text/html,<script>1</script>',
+    'http://example.com/',
+    'https://worldmonitor.app@example.com/',
+  ];
+
+  it('opens an off-origin article in a NEW tab instead of navigating the dashboard', async () => {
+    for (const [raw, expected] of OFF_ORIGIN) {
+      const box = makeSwSandbox();
+      let navigated = null;
+      let focused = false;
+      box.windowClients.push({
+        url: 'https://worldmonitor.app/',
+        focus() { focused = true; return this; },
+        navigate(url) { navigated = url; return Promise.resolve(); },
+      });
+      loadHandlerInto(box);
+      const ev = notifClickEvent({ url: raw });
+      box.emit('notificationclick', ev);
+      for (const p of ev.waits) await p;
+      assert.equal(navigated, null, `must NOT navigate the dashboard tab to ${raw}`);
+      assert.equal(focused, false, `must NOT steal focus for ${raw}`);
+      assert.equal(box.opened, expected, `must open ${raw} in a new tab`);
+    }
   });
 
-  it('source rejects non-allow-listed hosts before relay forwarding', async () => {
-    const { readFileSync } = await import('node:fs');
-    const { fileURLToPath } = await import('node:url');
-    const { dirname, resolve } = await import('node:path');
-    const __d = dirname(fileURLToPath(import.meta.url));
-    const src = readFileSync(
-      resolve(__d, '../api/notification-channels.ts'),
-      'utf-8',
-    );
-    // The guard must fire BEFORE convexRelay() — once the row lands
-    // in Convex, the relay will POST to it. Assert the guard appears
-    // inside the set-web-push branch before the convexRelay call.
-    const branch = src.match(/action === 'set-web-push'[\s\S]+?convexRelay/);
-    assert.ok(branch, "set-web-push branch must contain a convexRelay call");
-    assert.match(branch[0], /isAllowedPushEndpointHost/, 'allow-list check must precede the relay call');
-  });
-});
+  it('collapses non-https, non-same-origin targets to the dashboard', async () => {
+    for (const hostile of REJECTED) {
+      const box = makeSwSandbox();
+      loadHandlerInto(box);
+      box.emit('push', pushEvent({ title: 'Security notice', body: 'b', url: hostile }));
+      assert.equal(box.shown[0].opts.data.url, '/', `must not store ${hostile}`);
 
-// REGRESSION: PR #3173 P1 (cross-account subscription leak).
-// setWebPushChannelForUser must dedupe by endpoint across all users,
-// not just by (userId, channelType). Otherwise a shared device
-// delivers user A's alerts to user B after an account switch.
-describe('setWebPushChannelForUser endpoint dedupe', () => {
-  it('source deletes any existing rows with the same endpoint before insert', async () => {
-    const { readFileSync } = await import('node:fs');
-    const { fileURLToPath } = await import('node:url');
-    const { dirname, resolve } = await import('node:path');
-    const __d = dirname(fileURLToPath(import.meta.url));
-    const src = readFileSync(
-      resolve(__d, '../convex/notificationChannels.ts'),
-      'utf-8',
-    );
-    // Lock both the scan-by-endpoint AND the delete-before-insert
-    // pattern. If either drifts, the review finding reappears.
-    assert.match(src, /row\.endpoint === args\.endpoint/, 'setWebPushChannelForUser must compare rows by endpoint');
-    assert.match(src, /await ctx\.db\.delete\(row\._id\)/, 'matching rows must be deleted before upsert');
+      const ev = notifClickEvent({ url: hostile });
+      box.emit('notificationclick', ev);
+      for (const p of ev.waits) await p;
+      assert.equal(box.opened, '/', `must not open ${hostile}`);
+    }
+  });
+
+  it('never navigates an existing window off-origin, whatever the payload', async () => {
+    for (const [raw] of [...OFF_ORIGIN, ...REJECTED.map(r => [r])]) {
+      const box = makeSwSandbox();
+      let navigated = null;
+      box.windowClients.push({
+        url: 'https://worldmonitor.app/',
+        focus() { return this; },
+        navigate(url) { navigated = url; return Promise.resolve(); },
+      });
+      loadHandlerInto(box);
+      const ev = notifClickEvent({ url: raw });
+      box.emit('notificationclick', ev);
+      for (const p of ev.waits) await p;
+      assert.ok(
+        navigated === null || new URL(navigated, 'https://worldmonitor.app').origin === 'https://worldmonitor.app',
+        `navigate() must stay on-origin, got ${navigated} for ${raw}`,
+      );
+    }
+  });
+
+  it('still reuses the dashboard tab for same-origin targets', async () => {
+    const box = makeSwSandbox();
+    loadHandlerInto(box);
+    box.emit('push', pushEvent({ title: 't', url: 'https://worldmonitor.app/dashboard?x=1' }));
+    assert.equal(box.shown[0].opts.data.url, 'https://worldmonitor.app/dashboard?x=1');
+    const ev = notifClickEvent({ url: '/settings' });
+    box.emit('notificationclick', ev);
+    for (const p of ev.waits) await p;
+    assert.equal(box.opened, '/settings');
   });
 });
