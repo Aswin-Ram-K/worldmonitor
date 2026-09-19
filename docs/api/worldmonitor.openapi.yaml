@@ -477,7 +477,11 @@ paths:
                         type: string
                 - name: min_flights
                   in: query
-                  description: 'Minimum number of flights required to include a carrier (default: 1).'
+                  description: |-
+                    Minimum number of flights required to include a carrier (default: 3).
+                     The generated GET decoder emits 0 when the query param is absent, and 0
+                     means "use the default" in the handler — an explicit 0 is not a usable
+                     filter (every group has >= 1 flight).
                   required: false
                   example: 1
                   schema:
@@ -37277,7 +37281,11 @@ components:
                     type: integer
                     minimum: 0
                     format: int32
-                    description: 'Minimum number of flights required to include a carrier (default: 1).'
+                    description: |-
+                        Minimum number of flights required to include a carrier (default: 3).
+                         The generated GET decoder emits 0 when the query param is absent, and 0
+                         means "use the default" in the handler — an explicit 0 is not a usable
+                         filter (every group has >= 1 flight).
             description: GetCarrierOpsRequest specifies parameters for carrier operations metrics.
         worldmonitor_aviation_v1_GetCarrierOpsResponse:
             type: object
