@@ -849,6 +849,43 @@ describe('collectStructuredIncidents — producer status', () => {
     assert.equal(quakes.incidents[0]?.severity, 'high');
   });
 
+  it('rejects superstring place names that only contain the country name', async () => {
+    // Substring matching attributed foreign quakes to the wrong country:
+    // Nigeria to Niger, Somalia to Mali, Romania to Oman, Indiana to India,
+    // South Sudan to Sudan. Each place below sits far outside the request
+    // country's box, so only the name arm can fire — and it must not.
+    const superstrings: Array<[string, string, { lat: number; lon: number }]> = [
+      ['NE', 'Niger', { lat: 6.45, lon: 3.39 }], // Lagos, Nigeria
+      ['ML', 'Mali', { lat: 2.03, lon: 45.34 }], // Mogadishu, Somalia
+      ['OM', 'Oman', { lat: 44.42, lon: 26.1 }], // Bucharest, Romania
+      ['IN', 'India', { lat: 39.16, lon: -86.52 }], // Bloomington, Indiana
+      ['SD', 'Sudan', { lat: 4.85, lon: 31.57 }], // Juba, South Sudan
+    ];
+    const foreignPlace: Record<string, string> = {
+      NE: '10km S of Lagos, Nigeria',
+      ML: 'Mogadishu, Somalia',
+      OM: 'Bucharest, Romania',
+      IN: 'Bloomington, Indiana',
+      SD: 'Juba, South Sudan',
+    };
+    for (const [code, name, loc] of superstrings) {
+      const results = await collectStructuredIncidents({
+        ctx, code, countryName: name, cutoffMs: NOW_MS - DAY, now: NOW_MS,
+        deps: structuredDeps({
+          listEarthquakes: async () => ({ earthquakes: [{
+            id: `q-${code}`, place: foreignPlace[code], magnitude: 5.2, depthKm: 10,
+            location: { latitude: loc.lat, longitude: loc.lon },
+            occurredAt: NOW_MS - 2 * HOUR, sourceUrl: '', source: 'usgs', category: '',
+          }] }),
+        } as Partial<StructuredDependencies>),
+      });
+      assert.equal(
+        find(results, 'structured:earthquakes').incidents.length, 0,
+        `${foreignPlace[code]} must not attribute to ${name}`,
+      );
+    }
+  });
+
   it('rejects a structured record geolocated outside the country box', async () => {
     const results = await collect({
       listEarthquakes: async () => ({

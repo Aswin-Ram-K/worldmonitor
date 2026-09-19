@@ -21,6 +21,8 @@
 
 import { countryBox, inBox, splitCountryBox, type CountryBox } from '../../../../shared/country-bbox';
 import { resolveCountryCode } from '../../../../shared/country-code-resolve';
+// @ts-expect-error — plain ESM JS module, no TS declarations beyond country-mention.d.ts
+import { countryMentionTerms, mentionsCountry } from '../../../../shared/country-mention.js';
 import type {
   CountryTimelineIncident,
   CountryTimelineSeverity,
@@ -316,11 +318,17 @@ async function collectEarthquakes(req: StructuredRequest, box: CountryBox | null
       deps.listEarthquakes(req.ctx, { start: 0, end: 0, pageSize: 0, cursor: '', minMagnitude: 0 }),
       deps.readSeed(SEED_KEYS[source]!),
     ]);
-    const countryLower = req.countryName.toLowerCase();
+    // Word-boundary matching via the shared country-mention matcher: a
+    // substring test attributes foreign quakes to the wrong country (Nigeria
+    // to Niger, Somalia to Mali, Romania to Oman, Indiana to India, South
+    // Sudan to Sudan, US-state Georgia to country Georgia). The shared
+    // matcher also scrubs known superstring exclusions (South Sudan vs Sudan,
+    // Guinea variants) before matching.
+    const mentionTerms = countryMentionTerms(req.code);
     const incidents: CountryTimelineIncident[] = [];
     for (const quake of response.earthquakes) {
       const matches = inBox(box, quake.location?.latitude, quake.location?.longitude)
-        || quake.place?.toLowerCase().includes(countryLower) === true;
+        || (typeof quake.place === 'string' && mentionsCountry(quake.place, mentionTerms));
       if (!matches) continue;
       if (!Number.isFinite(quake.occurredAt) || quake.occurredAt < req.cutoffMs) continue;
       incidents.push({
