@@ -738,16 +738,20 @@ describe('backtestStock provider-work quota', () => {
     );
   });
 
-  it('rolls back the reservation when Yahoo work throws after a cache miss', async () => {
+  it('keeps a transient Yahoo outage out of the negative cache', async () => {
+    // A short Yahoo blip (502) must not become a shared 120s cached lie of
+    // `available: false`: only invalid-symbol / insufficient-history may be
+    // negatively cached. The fetcher now throws on `unavailable` so
+    // `cacheFetcherErrors: false` keeps the outage out of Redis.
     process.env.UPSTASH_REDIS_REST_URL = 'https://redis.example';
     process.env.UPSTASH_REDIS_REST_TOKEN = 'token';
-    const redisFetch = createRedisAwareBacktestFetch(mockChartPayload());
+    const redisFetch = createRedisAwareBacktestFetch({ chart: { result: null } });
     let yahooAttempts = 0;
     globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
       if (url.includes('query1.finance.yahoo.com')) {
         yahooAttempts += 1;
-        throw new Error('yahoo unavailable');
+        return new Response('gateway blip', { status: 502 });
       }
       return redisFetch.fetch(input, init);
     }) as typeof fetch;
@@ -760,6 +764,41 @@ describe('backtestStock provider-work quota', () => {
 
     assert.equal(response.available, false);
     assert.equal(yahooAttempts, 1);
+    assert.equal(
+      [...redisFetch.redis.values()].filter((value) => value.includes('__WM_NEG__')).length,
+      0,
+      'a transient Yahoo failure must not write a negative sentinel',
+    );
+    assert.ok(
+      ![...redisFetch.redis.keys()].some((key) => key.startsWith('market:backtest:')),
+      'a transient Yahoo failure must not write the shared backtest entry',
+    );
+    assert.equal(
+      Number(redisFetch.redis.get(backtestStockProviderQuotaKey('user_pro')) || '0'),
+      0,
+    );
+  });
+
+  it('rolls back the reservation when Yahoo work throws after a cache miss', async () => {
+    // A caller-local quota failure thrown from INSIDE the fetcher (not a
+    // Yahoo outage — those now throw before reaching quota-sensitive work and
+    // are covered by the negative-cache test above) must roll the reservation
+    // back instead of consuming the daily budget.
+    process.env.UPSTASH_REDIS_REST_URL = 'https://redis.example';
+    process.env.UPSTASH_REDIS_REST_TOKEN = 'token';
+    const redisFetch = createRedisAwareBacktestFetch(mockChartPayload());
+    const { throwQuotaForTest } = await import('../server/worldmonitor/market/v1/backtest-stock.ts');
+    throwQuotaForTest.arm();
+    try {
+      const response = await backtestStock(makeBacktestCtx('user_pro'), {
+        symbol: 'AMD',
+        name: 'AMD',
+        evalWindowDays: 10,
+      });
+      assert.equal(response.available, false);
+    } finally {
+      throwQuotaForTest.disarm();
+    }
     assert.equal(
       Number(redisFetch.redis.get(backtestStockProviderQuotaKey('user_pro')) || '0'),
       0,
