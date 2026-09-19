@@ -258,6 +258,46 @@ export type PrincipalRateLimitScope = 'session' | 'api_key';
 
 export type EndpointRateLimitOptions = RateLimitOptions;
 
+/**
+ * Header the gateway stamps with the rate-limit principal it RESOLVED for a
+ * request (`<scope>:<userId>`), so a handler that re-dispatches sub-requests
+ * can charge the caller's own budget without re-deriving identity itself.
+ *
+ * A handler cannot do that derivation safely: the credential headers it can
+ * see are raw and unvalidated, so a `wm_` prefix proves nothing about which
+ * bucket the gateway actually charged. Only the gateway knows, and it only
+ * knows after auth resolution completes.
+ *
+ * This is a gateway-internal trusted marker, exactly like
+ * TRUSTED_USER_ID_HEADER: the gateway is the only layer permitted to set it,
+ * and it strips inbound client copies at handler entry.
+ */
+export const TRUSTED_RATE_LIMIT_PRINCIPAL_HEADER = 'x-wm-rl-principal';
+
+export function formatTrustedRateLimitPrincipal(
+  principalUserId: string,
+  scope: PrincipalRateLimitScope,
+): string {
+  return `${scope}:${principalUserId}`;
+}
+
+/**
+ * Reads the gateway-stamped principal back into limiter options. Returns `{}`
+ * for anything unrecognised so the limiter falls back to the caller's IP —
+ * the same default the gateway itself uses when no principal was resolved.
+ */
+export function readTrustedRateLimitPrincipal(headers: Headers): RateLimitOptions {
+  const raw = headers.get(TRUSTED_RATE_LIMIT_PRINCIPAL_HEADER);
+  if (!raw) return {};
+  const separator = raw.indexOf(':');
+  if (separator < 1) return {};
+  const scope = raw.slice(0, separator);
+  const principalUserId = raw.slice(separator + 1);
+  if (!principalUserId) return {};
+  if (scope !== 'session' && scope !== 'api_key') return {};
+  return { principalUserId, principalScope: scope };
+}
+
 function getPrincipalRateLimitIdentifier(
   principalUserId?: string,
   scope: PrincipalRateLimitScope = 'session',

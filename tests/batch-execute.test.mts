@@ -28,7 +28,11 @@ import {
   MAX_SUB_RESPONSE_BYTES,
 } from '../server/worldmonitor/batch/v1/execute-batch.ts';
 import type { FetchLike } from '../server/worldmonitor/batch/v1/execute-batch.ts';
-import { __resetRateLimitForTest, hasEndpointRatePolicy } from '../server/_shared/rate-limit.ts';
+import {
+  __resetRateLimitForTest,
+  hasEndpointRatePolicy,
+  TRUSTED_RATE_LIMIT_PRINCIPAL_HEADER,
+} from '../server/_shared/rate-limit.ts';
 import { installRedis } from './helpers/fake-upstash-redis.mts';
 
 const ORIGIN = 'https://www.worldmonitor.app';
@@ -346,6 +350,67 @@ describe('executeBatch handler', () => {
     assert.equal(res.failed, 1);
   });
 
+  it('charges the gateway-stamped principal, not a guess from raw credential headers', async () => {
+    // The gateway stamps the principal it actually charged. A raw `wm_` header
+    // is unvalidated, so inferring `api_key` from it would let a session caller
+    // select the separate api_key bucket and split traffic across two budgets.
+    const redis = installRedis({});
+    const base = redis.fetchImpl;
+    const keys: string[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const body = typeof init?.body === 'string' ? init.body : '';
+      for (const match of body.matchAll(/"(rl:[^"]+)"/g)) keys.push(match[1]!);
+      return base(input, init);
+    }) as typeof fetch;
+
+    const { calls, fetchImpl } = recordingFetch();
+    const executeBatch = createExecuteBatch(fetchImpl);
+
+    await executeBatch(
+      makeCtx({
+        [TRUSTED_RATE_LIMIT_PRINCIPAL_HEADER]: 'api_key:user_stamped',
+        // Deliberately contradicts the stamp; the handler must ignore it.
+        'X-WorldMonitor-Key': 'wm_unvalidated',
+      }),
+      { operations: [{ id: 'a', path: '/api/market/v1/list-market-quotes' }] },
+    );
+
+    assert.ok(keys.length > 0, 'the caller charge must reach the limiter');
+    for (const key of keys) {
+      assert.match(key, /:apikey-user:user_stamped(:|$)/, `expected the stamped principal, got ${key}`);
+      assert.ok(!key.includes(CALLER_IP), 'a stamped principal must not fall back to IP');
+    }
+    // The trust marker is gateway-internal and must never cross into a sub-request.
+    const sent = new Headers(calls[0]!.init.headers as HeadersInit);
+    assert.equal(sent.get(TRUSTED_RATE_LIMIT_PRINCIPAL_HEADER), null);
+  });
+
+  it('falls back to the caller IP when the stamped principal is absent or malformed', async () => {
+    const redis = installRedis({});
+    const base = redis.fetchImpl;
+    const keys: string[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const body = typeof init?.body === 'string' ? init.body : '';
+      for (const match of body.matchAll(/"(rl:[^"]+)"/g)) keys.push(match[1]!);
+      return base(input, init);
+    }) as typeof fetch;
+
+    const executeBatch = createExecuteBatch(recordingFetch().fetchImpl);
+
+    // An unknown scope must not become a principal — it degrades to IP, never
+    // to an attacker-named bucket.
+    await executeBatch(
+      makeCtx({ [TRUSTED_RATE_LIMIT_PRINCIPAL_HEADER]: 'enterprise:user_forged' }),
+      { operations: [{ id: 'a', path: '/api/market/v1/list-market-quotes' }] },
+    );
+
+    assert.ok(keys.length > 0, 'the caller charge must reach the limiter');
+    for (const key of keys) {
+      assert.ok(key.includes(`:ip:${CALLER_IP}`), `expected an IP bucket, got ${key}`);
+      assert.ok(!key.includes('user_forged'), 'an unrecognised scope must not name the bucket');
+    }
+  });
+
   it('caps per-operation response size via Content-Length', async () => {
     const executeBatch = createExecuteBatch(async () =>
       new Response('{}', {
@@ -371,6 +436,59 @@ describe('batch gateway access', () => {
       if (!(k in originalEnv)) delete process.env[k];
     });
     Object.assign(process.env, originalEnv);
+  });
+
+  it('strips a client-supplied rate-limit principal before the fan-out charges it', async () => {
+    // The stamp is gateway-internal. If an inbound copy survived to the
+    // handler, any caller could name the bucket their batch is charged to.
+    const [{ createDomainGateway, serverOptions }, generated, { batchHandler }] = await Promise.all([
+      import('../server/gateway.ts'),
+      import('../src/generated/server/worldmonitor/batch/v1/service_server.ts'),
+      import('../server/worldmonitor/batch/v1/handler.ts'),
+    ]);
+    delete process.env.WORLDMONITOR_VALID_KEYS;
+    process.env.WM_SESSION_SECRET = 'synthetic-batch-principal-secret-at-least-32-bytes';
+    const redis = installRedis({});
+    __resetRateLimitForTest();
+    const { issueSessionToken } = await import('../api/_session.js');
+
+    const keys: string[] = [];
+    const base = redis.fetchImpl;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('/api/market/v1/')) {
+        return Response.json({ ok: true });
+      }
+      const body = typeof init?.body === 'string' ? init.body : '';
+      for (const match of body.matchAll(/"(rl:[^"]+)"/g)) keys.push(match[1]!);
+      return base(input, init);
+    }) as typeof fetch;
+
+    const token = (await issueSessionToken()).token;
+    const gateway = createDomainGateway(generated.createBatchServiceRoutes(batchHandler, serverOptions));
+    const res = await gateway(
+      new Request(`${ORIGIN}/api/batch/v1/execute`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Origin: ORIGIN,
+          'X-WorldMonitor-Key': token,
+          'x-real-ip': CALLER_IP,
+          [TRUSTED_RATE_LIMIT_PRINCIPAL_HEADER]: 'api_key:user_forged',
+        },
+        body: JSON.stringify({ operations: [{ id: 'a', path: '/api/market/v1/list-market-quotes' }] }),
+      }),
+    );
+
+    assert.equal(res.status, 200);
+    const subOpKeys = keys.filter((key) => key.includes('/api/market/v1/list-market-quotes'));
+    assert.ok(subOpKeys.length > 0, 'the sub-operation must be charged');
+    for (const key of keys) {
+      assert.ok(!key.includes('user_forged'), `a forged principal reached the limiter: ${key}`);
+    }
+    for (const key of subOpKeys) {
+      assert.ok(key.includes(`:ip:${CALLER_IP}`), `expected the caller's IP bucket, got ${key}`);
+    }
   });
 
   it('is NOT public and not premium: anonymous POST gets 401 before any fan-out', async () => {

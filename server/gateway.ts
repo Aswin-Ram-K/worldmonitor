@@ -24,7 +24,9 @@ import {
   checkRateLimit,
   checkEndpointRateLimit,
   checkFailClosedScopedIpRateLimit,
+  formatTrustedRateLimitPrincipal,
   hasEndpointRatePolicy,
+  TRUSTED_RATE_LIMIT_PRINCIPAL_HEADER,
 } from './_shared/rate-limit';
 import {
   drainResponseHeaders,
@@ -760,28 +762,53 @@ function attachRequiredBboxDiagnosticHeaders(
   }
 }
 
-// `TRUSTED_USER_ID_HEADER` (a.k.a. `x-user-id`) is gateway-internal: the
-// gateway is the ONLY layer permitted to set it, and it must reflect an
+// `TRUSTED_USER_ID_HEADER` (a.k.a. `x-user-id`) and
+// `TRUSTED_RATE_LIMIT_PRINCIPAL_HEADER` are gateway-internal: the gateway is
+// the ONLY layer permitted to set them, and each must reflect an
 // authenticated principal. Inbound client copies are stripped at handler
-// entry (see stripClientUserIdHeader); the authenticated value is re-
+// entry (see stripClientTrustedHeaders); the authenticated user id is re-
 // injected after Clerk / wm_ user-key / legacy bearer auth via
-// withAuthenticatedUserId. The internal-MCP block below has its own
-// strip-and-rebuild step that ALSO strips this header alongside
-// INTERNAL_MCP_VERIFIED_HEADER — both layers are defense-in-depth.
+// withAuthenticatedUserId, and the rate-limit principal is stamped once all
+// auth has resolved (see withTrustedRateLimitPrincipal). The internal-MCP
+// block below has its own strip-and-rebuild step that ALSO strips these
+// headers alongside INTERNAL_MCP_VERIFIED_HEADER — both layers are
+// defense-in-depth.
 function cloneRequestWithHeaders(request: Request, headers: Headers): Request {
   return new Request(request, { headers });
 }
 
-function stripClientUserIdHeader(request: Request): Request {
-  if (!request.headers.has(TRUSTED_USER_ID_HEADER)) return request;
+function stripClientTrustedHeaders(request: Request): Request {
+  if (
+    !request.headers.has(TRUSTED_USER_ID_HEADER) &&
+    !request.headers.has(TRUSTED_RATE_LIMIT_PRINCIPAL_HEADER)
+  ) {
+    return request;
+  }
   const headers = new Headers(request.headers);
   headers.delete(TRUSTED_USER_ID_HEADER);
+  headers.delete(TRUSTED_RATE_LIMIT_PRINCIPAL_HEADER);
   return cloneRequestWithHeaders(request, headers);
 }
 
 function withAuthenticatedUserId(request: Request, userId: string): Request {
   const headers = new Headers(request.headers);
   headers.set(TRUSTED_USER_ID_HEADER, userId);
+  return cloneRequestWithHeaders(request, headers);
+}
+
+// Stamped after auth resolution with the principal the gateway itself charged,
+// so a handler that re-dispatches sub-requests (the batch fan-out) charges the
+// same bucket a direct call would instead of guessing from raw credentials.
+function withTrustedRateLimitPrincipal(
+  request: Request,
+  principalUserId: string,
+  scope: 'session' | 'api_key',
+): Request {
+  const headers = new Headers(request.headers);
+  headers.set(
+    TRUSTED_RATE_LIMIT_PRINCIPAL_HEADER,
+    formatTrustedRateLimitPrincipal(principalUserId, scope),
+  );
   return cloneRequestWithHeaders(request, headers);
 }
 
@@ -948,7 +975,7 @@ export function createDomainGateway(
       return buildMarkdownTwinResponse(originalRequest, originalPathname);
     }
 
-    let request = stripClientUserIdHeader(originalRequest);
+    let request = stripClientTrustedHeaders(originalRequest);
     const rawPathname = new URL(request.url).pathname;
     const pathname = rawPathname.length > 1 ? rawPathname.replace(/\/+$/, '') : rawPathname;
     const t0 = Date.now();
@@ -1141,11 +1168,13 @@ export function createDomainGateway(
       const inboundHeaders = request.headers;
       if (
         inboundHeaders.has(INTERNAL_MCP_VERIFIED_HEADER) ||
-        inboundHeaders.has(TRUSTED_USER_ID_HEADER)
+        inboundHeaders.has(TRUSTED_USER_ID_HEADER) ||
+        inboundHeaders.has(TRUSTED_RATE_LIMIT_PRINCIPAL_HEADER)
       ) {
         const stripped = new Headers(inboundHeaders);
         stripped.delete(INTERNAL_MCP_VERIFIED_HEADER);
         stripped.delete(TRUSTED_USER_ID_HEADER);
+        stripped.delete(TRUSTED_RATE_LIMIT_PRINCIPAL_HEADER);
         // For GET/HEAD: no body to forward. For other methods: buffer the
         // body bytes and pass them to the new Request — `body: request.body`
         // (a ReadableStream) requires `duplex: 'half'` in Node's undici
@@ -2318,7 +2347,18 @@ export function createDomainGateway(
     // without leaf handlers having to thread a usage hook through every call.
     let response: Response;
     const handlerCall = matchedHandler;
-    const requestForHandler = request;
+    // Handlers that re-dispatch sub-requests must charge the caller's own
+    // budget; the identity resolved above is the only trustworthy source for
+    // it, since raw credential headers are unvalidated at that point. Absent
+    // a resolved principal the marker stays unset and handlers fall back to
+    // the caller's IP, matching this gateway's own attribution.
+    const requestForHandler = rateLimitPrincipalUserId
+      ? withTrustedRateLimitPrincipal(
+          request,
+          rateLimitPrincipalUserId,
+          isUserApiKey ? 'api_key' : 'session',
+        )
+      : request;
     try {
       response = await runWithUsageScope(
         {

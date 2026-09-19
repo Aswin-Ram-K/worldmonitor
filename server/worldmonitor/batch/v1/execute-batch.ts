@@ -30,8 +30,8 @@ import {
   checkEndpointRateLimit,
   checkRateLimit,
   hasEndpointRatePolicy,
+  readTrustedRateLimitPrincipal,
 } from '../../../_shared/rate-limit';
-import { TRUSTED_USER_ID_HEADER } from '../../../_shared/mcp-internal-hmac';
 
 export const MAX_BATCH_OPERATIONS = 20;
 export const MAX_OPERATION_ID_LENGTH = 64;
@@ -140,20 +140,6 @@ function buildSubRequestHeaders(inbound: Headers): Headers {
   headers.set('user-agent', inbound.get('user-agent') ?? DEFAULT_SUB_REQUEST_USER_AGENT);
   headers.set(BATCH_MARKER_HEADER, '1');
   return headers;
-}
-
-/**
- * Rate-limit identity of the BATCH CALLER, mirroring the gateway's own
- * attribution so a batched operation charges the same bucket a direct call
- * would: a validated wm_ user key is scoped `api_key`, any other
- * gateway-authenticated principal is the session, and everything else falls
- * back to the caller's IP inside the limiter.
- */
-function callerRateLimitOptions(inbound: Headers): EndpointRateLimitOptions {
-  const principalUserId = inbound.get(TRUSTED_USER_ID_HEADER);
-  if (!principalUserId) return {};
-  const wmKey = inbound.get('x-worldmonitor-key') ?? inbound.get('x-api-key') ?? '';
-  return { principalUserId, principalScope: wmKey.startsWith('wm_') ? 'api_key' : 'session' };
 }
 
 /**
@@ -270,7 +256,11 @@ export function createExecuteBatch(
     }
 
     const headers = buildSubRequestHeaders(ctx.request.headers);
-    const rateLimitOpts = callerRateLimitOptions(ctx.request.headers);
+    // Identity comes from the gateway's own stamped principal, never from the
+    // caller's raw credential headers: an unvalidated `wm_` prefix would let a
+    // session caller pick the separate api_key bucket and split its traffic
+    // across two budgets. No principal stamped ⇒ the limiter keys on IP.
+    const rateLimitOpts: EndpointRateLimitOptions = readTrustedRateLimitPrincipal(ctx.request.headers);
     const results = await Promise.all(
       validated.map(async (op) => {
         const refused = await chargeCaller(op, ctx.request, rateLimitOpts);
