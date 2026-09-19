@@ -328,9 +328,16 @@ function toDisplayDatePrice(p: ProtoDatePriceEntry): DatePrice {
 const client = new AviationServiceClient(getRpcBaseUrl(), { fetch: premiumFetch });
 
 function reviveDate(value: unknown): Date {
-  return value instanceof Date && !Number.isNaN(value.getTime())
-    ? value
-    : new Date(value as string | number);
+  if (value instanceof Date) {
+    if (Number.isFinite(value.getTime())) return value;
+  } else if (
+    value !== null
+    && (typeof value === 'string' || (typeof value === 'number' && Number.isFinite(value)))
+  ) {
+    const date = new Date(value);
+    if (Number.isFinite(date.getTime())) return date;
+  }
+  throw new TypeError('Invalid persisted date');
 }
 
 const breakerDelays = createCircuitBreaker<AirportDelayAlert[]>({
