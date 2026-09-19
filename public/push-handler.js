@@ -98,7 +98,7 @@ self.addEventListener('notificationclick', (event) => {
       // An off-origin article always gets a fresh tab. Never hand it the
       // dashboard's — that tab is a trusted surface the user came back to.
       if (crossOrigin) {
-        if (clients.openWindow) return clients.openWindow(target);
+        if (clients.openWindow) return await clients.openWindow(target);
         return;
       }
       const all = await clients.matchAll({ type: 'window', includeUncontrolled: true });
@@ -112,13 +112,14 @@ self.addEventListener('notificationclick', (event) => {
             if ('navigate' in c && typeof c.navigate === 'function') {
               await c.navigate(target);
             }
-            return c.focus();
+            return await c.focus();
           }
         } catch {
-          // URL parse failure or cross-origin — fall through to open.
+          // URL parse failure, cross-origin, or a focus/navigate rejection
+          // — fall through and try opening a window instead.
         }
       }
-      if (clients.openWindow) return clients.openWindow(target);
+      if (clients.openWindow) return await clients.openWindow(target);
     } catch {
       // Swallow — nothing to do beyond failing silently.
     }
