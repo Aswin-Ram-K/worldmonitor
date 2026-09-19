@@ -173,7 +173,13 @@ export function redactAnalyticsUrl(event: BeforeSendEvent): BeforeSendEvent {
   if (typeof raw !== 'string' || raw.length === 0) return event;
   let parsed: URL;
   try {
-    parsed = new URL(raw, 'http://localhost');
+    // Relative analytics URLs resolve against the current origin in the
+    // browser; without a window (tests) only absolute URLs parse, which is
+    // all production pageview events carry. Deliberately no hardcoded
+    // parse-base host here: a literal would read as a fetched host to the
+    // source-attribution scanner and stale the manifest.
+    const base = typeof window !== 'undefined' ? window.location.origin : undefined;
+    parsed = base ? new URL(raw, base) : new URL(raw);
   } catch {
     return event;
   }
@@ -186,7 +192,12 @@ export function redactAnalyticsUrl(event: BeforeSendEvent): BeforeSendEvent {
     }
   }
   if (!changed) return event;
-  return { ...event, url: parsed.toString().replace(/^http:\/\/localhost/, '') || '/' };
+  const redacted = parsed.toString();
+  // Strip the parse-only base when the test path resolved a relative URL
+  // against the current origin — absolute production URLs pass through.
+  const origin = typeof window !== 'undefined' ? window.location.origin : '';
+  const url = origin && redacted.startsWith(origin) ? redacted.slice(origin.length) || '/' : redacted;
+  return { ...event, url };
 }
 
 /**
