@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { detectConvergence } from '@/services/analysis-core';
-import type { ClusteredEventCore } from '../../../shared/news-clustering-core.js';
+import type { ClusteredEventCore } from '../../shared/news-clustering-core.js';
 
 describe('source convergence window', () => {
   it('describes the 60-minute filter, including items older than 30 minutes', () => {

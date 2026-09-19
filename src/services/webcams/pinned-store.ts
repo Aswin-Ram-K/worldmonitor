@@ -1,3 +1,5 @@
+import { safeStorageGet, safeStorageSet, safeStorageSetChecked } from '@/utils/safe-storage';
+
 const STORAGE_KEY = 'wm-pinned-webcams';
 const CHANGE_EVENT = 'wm-pinned-webcams-changed';
 const CLOUD_PREFS_APPLIED_EVENT = 'wm:cloud-prefs-applied';
@@ -51,7 +53,7 @@ function load(): PinnedWebcam[] {
   let list: PinnedWebcam[] = [];
   let invalid = false;
   try {
-    const parsed = parseStored(localStorage.getItem(STORAGE_KEY));
+    const parsed = parseStored(safeStorageGet(STORAGE_KEY));
     if (parsed) list = parsed;
     else invalid = true;
   } catch {
@@ -59,9 +61,7 @@ function load(): PinnedWebcam[] {
   }
   _cachedList = list;
   if (invalid) {
-    try {
-      localStorage.setItem(STORAGE_KEY, '[]');
-    } catch { /* keep the in-memory empty list */ }
+    safeStorageSet(STORAGE_KEY, '[]');
     notifyChange();
   }
   if (_cacheFrame === null) {
@@ -101,10 +101,8 @@ function showToast(msg: string): void {
 }
 
 function save(webcams: PinnedWebcam[]): void {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(webcams));
-  } catch (err) {
-    console.warn('[pinned-webcams] localStorage save failed:', err);
+  if (!safeStorageSetChecked(STORAGE_KEY, JSON.stringify(webcams))) {
+    console.warn('[pinned-webcams] save failed: storage rejected the write');
     showToast('Could not save pinned webcams — storage full');
   }
   _cachedList = null;
