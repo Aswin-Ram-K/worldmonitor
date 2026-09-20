@@ -1,7 +1,8 @@
 export const DEBUGBEAR_RUM_SCRIPT_SRC = 'https://cdn.debugbear.com/lpMwA9KpC6pf.js';
 // 10% sampling. 100% overran the DebugBear RUM monthly quota (~529k/500k, 2026-07).
 // Bootstrap transfer evidence and ongoing web-vitals RUM need only a fraction.
-// Keep in sync with pro-test/src/debugbear-rum.ts (asserted by the test).
+// Re-exported by pro-test/src/debugbear-rum.ts so both shipped surfaces use
+// this exact bounded snapshot and listener lifecycle.
 export const DEBUGBEAR_RUM_SAMPLE_RATE = 10;
 const DEBUGBEAR_RUM_SCRIPT_PATHNAME = new URL(DEBUGBEAR_RUM_SCRIPT_SRC).pathname;
 /** Every production host the RUM script loads on. Exported so

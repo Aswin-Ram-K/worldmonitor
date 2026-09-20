@@ -230,10 +230,12 @@ describe('DebugBear RUM loader', () => {
 });
 
 describe('DebugBear RUM marketing loader', () => {
-  it('uses the same script endpoint and sample rate as the dashboard loader', () => {
+  it('reuses the dashboard lifecycle implementation', () => {
     assert.equal(MARKETING_DEBUGBEAR_RUM_SCRIPT_SRC, DEBUGBEAR_RUM_SCRIPT_SRC);
     assert.equal(MARKETING_DEBUGBEAR_RUM_SAMPLE_RATE, DEBUGBEAR_RUM_SAMPLE_RATE);
     assert.equal(MARKETING_DEBUGBEAR_RUM_SAMPLE_RATE, 10);
+    assert.equal(initMarketingDebugBearRum, initDebugBearRum);
+    assert.equal(resetMarketingDebugBearRumForTesting, resetDebugBearRumForTesting);
   });
 
   it('uses the same production-host gate as the dashboard loader', () => {

@@ -565,6 +565,11 @@ function loadUmamiScript(): void {
   script.src = UMAMI_SCRIPT_SRC;
   script.dataset.websiteId = UMAMI_WEBSITE_ID;
   script.dataset.domains = UMAMI_DOMAINS;
+  // Deferred consumers intentionally keep invite, checkout, referral, and
+  // Clerk parameters in the live URL until they can process them. Automatic
+  // pageviews must never copy those query/hash credentials into Umami.
+  script.dataset.excludeSearch = 'true';
+  script.dataset.excludeHash = 'true';
   script.addEventListener('load', flushPendingUmamiCalls, { once: true });
   script.addEventListener('error', () => {
     umamiLoadStarted = false;
