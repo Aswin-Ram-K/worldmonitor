@@ -99,7 +99,9 @@ describe('push-handler.js — push event', () => {
     assert.equal(title, 'Your brief is ready');
     assert.equal(opts.body, 'Iran threatens Strait of Hormuz closure · 11 more threads');
     assert.equal(opts.tag, 'brief_ready:user_abc');
-    assert.equal(opts.data.url, 'https://worldmonitor.app/api/brief/user_abc/2026-04-18?t=xxx');
+    // classifyClickTarget also runs on the push event, so an apex-absolute
+    // payload is normalized onto the serving origin before it is stored.
+    assert.equal(opts.data.url, `${box.origin}/api/brief/user_abc/2026-04-18?t=xxx`);
     // brief_ready should requireInteraction — don't let a lock-screen
     // swipe dismiss the CTA before the user reads the brief.
     assert.equal(opts.requireInteraction, true);
@@ -159,7 +161,7 @@ describe('push-handler.js — notificationclick', () => {
     assert.equal(ev.closed, true);
     // Wait for the waitUntil chain
     for (const p of ev.waits) await p;
-    assert.equal(box.opened, 'https://worldmonitor.app/api/brief/user_a/2026-04-18?t=abc');
+    assert.equal(box.opened, `${box.origin}/api/brief/user_a/2026-04-18?t=abc`);
   });
 
   it('focuses + navigates an existing same-origin window instead of opening', async () => {
@@ -167,7 +169,7 @@ describe('push-handler.js — notificationclick', () => {
     let focused = false;
     let navigated = null;
     box.windowClients.push({
-      url: 'https://worldmonitor.app/',
+      url: `${box.origin}/`,
       focus() { focused = true; return this; },
       navigate(url) { navigated = url; return Promise.resolve(); },
     });
@@ -176,7 +178,7 @@ describe('push-handler.js — notificationclick', () => {
     box.emit('notificationclick', ev);
     for (const p of ev.waits) await p;
     assert.equal(focused, true);
-    assert.equal(navigated, 'https://worldmonitor.app/api/brief/u/d?t=t');
+    assert.equal(navigated, `${box.origin}/api/brief/u/d?t=t`);
     assert.equal(box.opened, null, 'openWindow must NOT fire when a window is focused');
   });
 
@@ -219,8 +221,12 @@ describe('push-handler.js — off-origin click targets', () => {
       const box = makeSwSandbox();
       let navigated = null;
       let focused = false;
+      // The client must sit on the origin actually serving the worker,
+      // otherwise it is never same-origin, the reuse branch is unreachable,
+      // and "we did not navigate the dashboard" passes because there was no
+      // dashboard tab to navigate.
       box.windowClients.push({
-        url: 'https://worldmonitor.app/',
+        url: `${box.origin}/`,
         focus() { focused = true; return this; },
         navigate(url) { navigated = url; return Promise.resolve(); },
       });
@@ -253,7 +259,7 @@ describe('push-handler.js — off-origin click targets', () => {
       const box = makeSwSandbox();
       let navigated = null;
       box.windowClients.push({
-        url: 'https://worldmonitor.app/',
+        url: `${box.origin}/`,
         focus() { return this; },
         navigate(url) { navigated = url; return Promise.resolve(); },
       });
@@ -262,7 +268,7 @@ describe('push-handler.js — off-origin click targets', () => {
       box.emit('notificationclick', ev);
       for (const p of ev.waits) await p;
       assert.ok(
-        navigated === null || new URL(navigated, 'https://worldmonitor.app').origin === 'https://worldmonitor.app',
+        navigated === null || new URL(navigated, box.origin).origin === box.origin,
         `navigate() must stay on-origin, got ${navigated} for ${raw}`,
       );
     }
@@ -273,13 +279,13 @@ describe('push-handler.js — off-origin click targets', () => {
     let navigated = null;
     let focused = false;
     box.windowClients.push({
-      url: 'https://worldmonitor.app/',
+      url: `${box.origin}/`,
       focus() { focused = true; return this; },
       navigate(url) { navigated = url; return Promise.resolve(); },
     });
     loadHandlerInto(box);
     box.emit('push', pushEvent({ title: 't', url: 'https://worldmonitor.app/dashboard?x=1' }));
-    assert.equal(box.shown[0].opts.data.url, 'https://worldmonitor.app/dashboard?x=1');
+    assert.equal(box.shown[0].opts.data.url, `${box.origin}/dashboard?x=1`);
     const ev = notifClickEvent({ url: '/settings' });
     box.emit('notificationclick', ev);
     for (const p of ev.waits) await p;
@@ -543,5 +549,32 @@ describe('push-handler.js — origin-agnostic click targets', () => {
       await clickNotification(box, { url: raw });
       assert.equal(client.navigated, '/', `${raw} must collapse (${why})`);
     }
+  });
+});
+
+// The worker hand-copies the Cloudflare apex-exemption list because a service
+// worker cannot import from a test module — making it a THIRD uncoordinated
+// copy (the zone rule, the published-corpus guard, and now this). If the zone
+// gains a sixth exempt path and only one copy learns about it, the worker
+// silently rewrites it and reproduces the #4938 POST-to-GET 405. This binds the
+// two in-repo copies so they cannot drift apart unnoticed.
+describe('push-handler.js — apex exemption list stays in sync', () => {
+  it('mirrors APEX_SERVED from the published-corpus guard', () => {
+    const read = (rel) => readFileSync(resolve(__dirname, rel), 'utf-8');
+    const patternsIn = (src, constName) => {
+      const block = src.match(new RegExp(`${constName}\\s*=\\s*\\[([\\s\\S]*?)\\];`));
+      assert.ok(block, `${constName} must exist`);
+      return (block[1].match(/\/\^[^\n,]*\//g) ?? []).map((p) => p.trim()).sort();
+    };
+
+    const guard = patternsIn(read('./agent-corpus-canonical-host.test.mjs'), 'APEX_SERVED');
+    const worker = patternsIn(read('../public/push-handler.js'), 'APEX_SERVED_PATHS');
+
+    assert.ok(guard.length >= 5, 'the corpus guard must still carry the exemption list');
+    assert.deepEqual(
+      worker,
+      guard,
+      'public/push-handler.js must exempt exactly the paths Cloudflare serves on the apex',
+    );
   });
 });

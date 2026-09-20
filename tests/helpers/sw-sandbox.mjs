@@ -28,12 +28,6 @@ export const VERTICAL_ORIGIN = 'https://tech.worldmonitor.app';
 /** Both origins that origin-sensitive behaviour must be proven against. */
 export const SERVING_ORIGINS = [PRIMARY_ORIGIN, VERTICAL_ORIGIN];
 
-// The origin the suite assumed before this work: the apex, which the worker is
-// never actually served from. Kept as the default for exactly one commit so the
-// extraction above can be proven behaviour-preserving; U6 flips the default to
-// PRIMARY_ORIGIN and corrects the fixtures that hardcode this host.
-const LEGACY_FIXTURE_ORIGIN = 'https://worldmonitor.app';
-
 export function readHandlerSource() {
   return readFileSync(resolve(__dirname, '../../public/push-handler.js'), 'utf-8');
 }
@@ -41,9 +35,9 @@ export function readHandlerSource() {
 /**
  * Build a fake `self` + `clients` pair and record what the handler asked for.
  *
- * @param {string} origin The origin serving the worker.
+ * @param {string} origin The origin serving the worker. Defaults to the primary host.
  */
-export function makeSwSandbox(origin = LEGACY_FIXTURE_ORIGIN) {
+export function makeSwSandbox(origin = PRIMARY_ORIGIN) {
   const listeners = new Map();
   const shown = [];
   const windowClients = [];
