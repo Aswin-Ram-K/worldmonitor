@@ -497,6 +497,7 @@ PROTO_INPUTS=(
   server/gateway.ts
   server/request-validator.ts
   server/router.ts
+  server/worldmonitor/consumer-prices/v1/_market-code.ts
   server/worldmonitor/consumer-prices/v1/get-consumer-price-basket-series.ts
   server/worldmonitor/supply-chain/v1/scenario-templates.ts
   shared/attribution-rider.ts
