@@ -18,10 +18,14 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
-import vm from 'node:vm';
+import {
+  makeSwSandbox,
+  loadHandlerInto,
+  pushEvent,
+  notifClickEvent,
+} from './helpers/sw-sandbox.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const handlerSource = readFileSync(resolve(__dirname, '../public/push-handler.js'), 'utf-8');
 
 // ── Pure helpers ──────────────────────────────────────────────────────────
 
@@ -65,78 +69,8 @@ describe('push config helpers', () => {
 
 // ── Service worker handler ────────────────────────────────────────────────
 
-/**
- * Build a minimal SW-ish sandbox: fake `self` with an event bus, a fake
- * `clients` API, and a tracking registration. Events are dispatched
- * synchronously via emit() and we capture what the handler requested.
- */
-function makeSwSandbox() {
-  const listeners = new Map();
-  const shown = [];
-  const windowClients = [];
-  let opened = null;
-
-  const self = {
-    location: { origin: 'https://worldmonitor.app' },
-    addEventListener(name, fn) {
-      if (!listeners.has(name)) listeners.set(name, []);
-      listeners.get(name).push(fn);
-    },
-    registration: {
-      showNotification(title, opts) {
-        shown.push({ title, opts });
-        return Promise.resolve();
-      },
-    },
-  };
-  const clients = {
-    matchAll: async () => windowClients,
-    openWindow: async (url) => { opened = url; return { url }; },
-  };
-  return {
-    self, clients, shown, windowClients,
-    get opened() { return opened; },
-    emit(name, event) {
-      const fns = listeners.get(name) ?? [];
-      for (const fn of fns) fn(event);
-    },
-  };
-}
-
-function loadHandlerInto(sandbox) {
-  const ctx = vm.createContext({
-    self: sandbox.self,
-    clients: sandbox.clients,
-    URL,
-  });
-  vm.runInContext(handlerSource, ctx);
-}
-
-function pushEvent(payload) {
-  const waits = [];
-  return {
-    data: payload === null ? null : {
-      json() { return typeof payload === 'string' ? JSON.parse(payload) : payload; },
-      text() { return typeof payload === 'string' ? payload : JSON.stringify(payload); },
-    },
-    waitUntil(p) { waits.push(p); },
-    waits,
-  };
-}
-
-function notifClickEvent(data) {
-  let closed = false;
-  const waits = [];
-  return {
-    notification: {
-      data,
-      close() { closed = true; },
-    },
-    waitUntil(p) { waits.push(p); },
-    get closed() { return closed; },
-    waits,
-  };
-}
+// Sandbox, handler loader, and event factories live in ./helpers/sw-sandbox.mjs
+// so the relay suite can drive the same handler (see the cross-module test there).
 
 describe('push-handler.js — push event', () => {
   it('renders a notification with the payload fields', () => {
