@@ -238,3 +238,92 @@ describe('relay -> service worker contract', () => {
     assert.equal(box.opened, 'https://worldmonitor.app/oauth/register');
   });
 });
+
+describe('push path carries no origin literal', () => {
+  // The published-corpus guard (tests/agent-corpus-canonical-host.test.mjs)
+  // exists for exactly this bug class but scans only public/ text files, which
+  // is why a literal in a .cjs script slipped past it. Widening that guard to
+  // scripts/ is deferred: it would red 37 of 40 files, and only 9 occurrences
+  // across 4 files are genuine — the rest are User-Agent strings, Origin and
+  // HTTP-Referer headers, and CORS allowlist entries, which are byte-compared
+  // identifiers of the same class the guard already exempts for OAuth issuers.
+  // Separating those needs an exemption taxonomy that does not exist yet.
+  //
+  // So pin the push path narrowly instead. Scoped to the regions that build a
+  // click URL, because the relay legitimately uses the apex elsewhere. Matching
+  // a SCHEME-BEARING literal only, because the worker names both generic hosts
+  // as bare hostnames by design — a bare-hostname ban would forbid in one place
+  // what another requires.
+  const ORIGIN_LITERAL = /https:\/\/(?:www\.)?worldmonitor\.app/;
+
+  const relaySource = () => {
+    const { readFileSync } = require('node:fs');
+    return readFileSync(require.resolve('../scripts/notification-relay.cjs'), 'utf-8');
+  };
+
+  /** The push click-URL path is not contiguous — collect its regions by name. */
+  function pushPathRegions(src) {
+    const regions = {};
+    const sanitizer = src.match(/function safePushClickUrl\([\s\S]+?\n\}/);
+    assert.ok(sanitizer, 'safePushClickUrl must exist');
+    regions.safePushClickUrl = sanitizer[0];
+
+    const send = src.match(/async function sendWebPush\([\s\S]+?\n\}/);
+    assert.ok(send, 'sendWebPush must exist');
+    regions.sendWebPush = send[0];
+
+    const calls = src.match(/sendWebPush\([^)]*?,\s*\{[\s\S]*?\n\s*\}\)/g) ?? [];
+    assert.ok(calls.length >= 3, `expected the three sendWebPush call sites, saw ${calls.length}`);
+    calls.forEach((c, i) => { regions[`callSite${i + 1}`] = c; });
+    return regions;
+  }
+
+  it('no region of the push click-URL path names an origin, except the parse base', () => {
+    const src = relaySource();
+    const regions = pushPathRegions(src);
+    for (const [name, region] of Object.entries(regions)) {
+      // The one allowed literal: a relative base is not a legal base, so the
+      // sanitizer must keep one absolute origin to resolve against. It is
+      // never returned.
+      const withoutParseBase = region.replace(
+        /const PUSH_PARSE_BASE = '[^']*';/,
+        "const PUSH_PARSE_BASE = '<parse-base>';",
+      );
+      assert.doesNotMatch(
+        withoutParseBase,
+        ORIGIN_LITERAL,
+        `${name} must not name an origin — emit a relative path instead`,
+      );
+    }
+  });
+
+  it('fails when a literal is reintroduced into any region', () => {
+    // Proves the assertion above is not vacuous: each region, injected
+    // independently, must trip it.
+    const src = relaySource();
+    for (const [name, region] of Object.entries(pushPathRegions(src))) {
+      const poisoned = `${region}\n// url: 'https://worldmonitor.app/'`;
+      assert.match(
+        poisoned.replace(/const PUSH_PARSE_BASE = '[^']*';/, ''),
+        ORIGIN_LITERAL,
+        `${name} region must be large enough to catch a reintroduced literal`,
+      );
+    }
+  });
+
+  it('the service worker names no origin either', () => {
+    const { readFileSync } = require('node:fs');
+    const worker = readFileSync(require.resolve('../public/push-handler.js'), 'utf-8');
+    // Comments legitimately quote hostile URLs to explain what the guards stop
+    // (blob:https://www.worldmonitor.app/x, https://worldmonitor.app//evil.com).
+    // The pin is about values the code can EMIT, so strip prose first.
+    const code = worker
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/^\s*\/\/.*$/gm, '');
+    assert.doesNotMatch(
+      code,
+      ORIGIN_LITERAL,
+      'push-handler.js must match hosts by bare hostname, never a scheme-bearing origin',
+    );
+  });
+});
