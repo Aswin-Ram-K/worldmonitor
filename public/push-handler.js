@@ -173,7 +173,18 @@ self.addEventListener('notificationclick', (event) => {
             if ('navigate' in c && typeof c.navigate === 'function') {
               await c.navigate(target);
             }
-            return await c.focus();
+            // Once a client has been navigated the content is delivered, so a
+            // focus failure must not fall through to openWindow — that would
+            // leave the tab navigated AND spawn a duplicate at the same URL,
+            // the "duplicated app state" this branch exists to avoid.
+            // focus() rejects with InvalidAccessError once the click's
+            // transient activation expires, which the awaited navigate() above
+            // makes reachable.
+            try {
+              return await c.focus();
+            } catch {
+              return;
+            }
           }
         } catch {
           // URL parse failure, cross-origin, or a focus/navigate rejection

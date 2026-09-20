@@ -306,17 +306,43 @@ describe('push-handler.js — off-origin click targets', () => {
     }
   });
 
-  it('swallows a focus rejection on the reused dashboard tab', async () => {
+  // A focus rejection after a SUCCESSFUL navigate must not also open a tab.
+  //
+  // #8384 changed `return c.focus()` to `return await c.focus()`, which
+  // correctly stops the rejection escaping into waitUntil() — but it also
+  // routes that rejection into the inner catch, so the loop falls through and
+  // openWindow fires for a URL the dashboard tab was already navigated to. The
+  // user gets two tabs on the same page: exactly the duplicated app state this
+  // branch's own comment says it exists to avoid.
+  //
+  // Asserting only doesNotReject cannot see that. Mutating the catch to an
+  // early `return` — which disables the fallback entirely — left the old
+  // assertion green.
+  it('does not open a duplicate tab when focus rejects after a successful navigate', async () => {
     const box = makeSwSandbox();
+    let navigated = null;
     box.windowClients.push({
-      url: 'https://worldmonitor.app/',
+      url: `${box.origin}/`,
       focus() { return Promise.reject(new Error('focus denied')); },
-      navigate() { return Promise.resolve(); },
+      navigate(url) { navigated = url; return Promise.resolve(); },
     });
     loadHandlerInto(box);
     const ev = notifClickEvent({ url: '/settings' });
     box.emit('notificationclick', ev);
     await assert.doesNotReject(Promise.all(ev.waits));
+    assert.equal(navigated, '/settings', 'the open tab is still navigated');
+    assert.equal(box.opened, null, 'content was already delivered — no second tab');
+  });
+
+  // The fallback itself must stay intact: when NO same-origin client exists,
+  // openWindow is still the right outcome.
+  it('still opens a window when no same-origin client exists', async () => {
+    const box = makeSwSandbox();
+    loadHandlerInto(box);
+    const ev = notifClickEvent({ url: '/settings' });
+    box.emit('notificationclick', ev);
+    await Promise.all(ev.waits);
+    assert.equal(box.opened, '/settings');
   });
 });
 
