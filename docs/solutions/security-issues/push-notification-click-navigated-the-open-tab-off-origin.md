@@ -39,7 +39,16 @@ The web-push service worker navigated the user's already-open WorldMonitor dashb
 
 The local suite stayed green because its sandbox pinned `self.location.origin` to the apex. **The guard was not wrong about origins; the fixture agreed with the guard instead of with production**, so the one assumption that mattered was never under test. When the sandbox was later parameterized by origin, two further pre-existing tests went red immediately — their window client sat on the apex, so "we did not navigate the dashboard" had been holding vacuously for want of a same-origin tab in the fixture at all.
 
-**A `blob:` target reached the same-origin branch.** The first fix ordered the checks credentials → origin → scheme. `new URL('blob:https://www.worldmonitor.app/abc').origin` returns the *inner* origin, `https://www.worldmonitor.app` — so on the www worker a `blob:` URL satisfied the same-origin test and was handed to `c.navigate()` on the dashboard tab, while the code comment directly above claimed the non-https collapse was exhaustive. It was exhaustive only for schemes whose origin serializes to `null` (`javascript:`, `data:`). Moving the scheme gate above the origin comparison is what makes the comment true.
+**A `blob:` target reached the same-origin branch — and its reachability is the interesting part.** The first fix ordered the checks credentials → origin → scheme. `new URL('blob:https://www.worldmonitor.app/abc').origin` returns the *inner* origin, `https://www.worldmonitor.app`, so on the www worker a `blob:` URL satisfied the same-origin test and was handed to `c.navigate()` on the dashboard tab — while the code comment directly above claimed the non-https collapse was exhaustive. It was exhaustive only for schemes whose origin serializes to `null` (`javascript:`, `data:`).
+
+Four clauses, each checkable, because the obvious summary of this is wrong in both directions:
+
+1. **Not shipped.** The branch never merged (`git merge-base --is-ancestor <head> origin/main` fails), so nothing reached production.
+2. **Not reachable through the new dispatcher.** The same pass added an https-only gate to the dispatcher, so no *new* payload could carry a `blob:` target to a worker. Through that path it was pure defense-in-depth.
+3. **Reachable on merge, through history.** The pre-PR dispatcher sanitized nothing — it stored `payload.url` verbatim — so a publisher could already have put a `blob:` target into a notification that is still displayed. Displayed notifications never expire and their click is dispatched to whichever worker is *active at click time*, so on merge the new worker would have handled those legacy notifications with the broken ordering. This is the same persistence property the fix is built around, turned against the fix: **adding an input guard does not retire the payloads that predate it.**
+4. **Bounded to tab defacement, not a phishing pivot.** A blob URL can only be minted inside its own origin's context, so an attacker cannot create one in ours; the navigation lands on a dead blob. That is why reviewers rated it P2/P3 rather than P0, and why describing it as an exploitable navigation would misprice it for the next reader.
+
+Moving the scheme gate above the origin comparison is what makes the comment true.
 
 Three further defects rode along, and all three were caught by automated PR reviewers on #8384 — not by the author, not by the local run, not by CI.
 
@@ -112,6 +121,12 @@ git diff <base> -- <path> | grep '^-' | grep 'describe(\|function \|export '
 
 Every line it prints must be an intentional deletion. Prefer an anchored insert (`s.replace(anchor, new_suite + anchor)`) over index slicing; if you slice, `s[:start] + new_suite + s[start:]`, never `s[:start] + new_suite`. A raw count is not a substitute, because the count can rise while suites vanish: here 14 → 15 looked like +1 added, and was actually +4 added, −3 deleted.
 
+Two refinements, both learned by hitting this class a second and third time in the same PR:
+
+**Anchor a slice on the preceding block's own last line, never on the next section heading.** Headings repeat, and `str.index(heading)` returns the *nearest* match, which can be hundreds of lines past the block you meant to replace. Re-applying one glossary entry this way silently deleted 318 lines of the file.
+
+**In a prose file, the diff statistic is the only signal there is.** Code has a suite that can go red; `CONCEPTS.md` has nothing. `git show --numstat` on the commit is the check — for a docs commit, insertions should dominate and every deletion should be an in-place line replacement you can name. That numstat is what caught the 318-line deletion, one step before it was pushed.
+
 **2. `return await` inside a `try`, always.** In an `async` function, `return p` inside `try { } catch { }` hands `p`'s rejection to the caller, not to that `catch`. In a service worker the caller is `event.waitUntil()`, so the rejection becomes an unhandled rejection with no owner. Grep the SW surface for the shape:
 
 ```sh
@@ -161,7 +176,7 @@ for (const origin of ['https://www.worldmonitor.app', 'https://tech.worldmonitor
 
 Derive every fixture URL from that parameter — a window client left on a hardcoded origin is how two of these tests had been passing vacuously, with no same-origin tab in the fixture for "we did not navigate the dashboard" to be about. The general rule: when a guard compares against an environment value, the fixture must supply the *real* values, and more than one of them, or the test proves only that the guard agrees with itself.
 
-**7. Order a scheme gate above an origin comparison, and distrust `URL.origin` for exotic schemes.** `new URL('blob:https://www.worldmonitor.app/x').origin` returns the inner origin, so a `blob:` target satisfies a same-origin test that `javascript:` and `data:` (origin `null`) both fail. Any classifier that reasons about origin must reject non-`https:` first, or its "everything else collapses" comment is false for exactly the schemes nobody tests. Check the claim rather than the comment:
+**7. Order a scheme gate above an origin comparison, and distrust `URL.origin` for exotic schemes.** `new URL('blob:https://www.worldmonitor.app/x').origin` returns the inner origin, so a `blob:` target satisfies a same-origin test that `javascript:` and `data:` (origin `null`) both fail. Any classifier that reasons about origin must reject non-`https:` first, or its "everything else collapses" comment is false for exactly the schemes nobody tests. And when you assess such a hole, separate *reachable through the new input path* from *reachable through payloads that predate the guard* — a guard added upstream does not retire what is already stored downstream. Check the claim rather than the comment:
 
 ```sh
 node -e "console.log(new URL('blob:https://www.worldmonitor.app/x').origin)"   # => https://www.worldmonitor.app
