@@ -631,20 +631,78 @@ function ensureVapidConfigured(client) {
 //
 // The relay's half is scheme discipline — a javascript:, data: or http:
 // target must never be stored in a notification payload at all.
-const PUSH_DASHBOARD_URL = 'https://worldmonitor.app/';
+// Resolution base ONLY — never returned. A relative base is not a legal base
+// (`new URL('/x', '/')` throws), so the sanitizer needs one absolute
+// first-party origin to parse against even though it emits none. This is the
+// single origin literal the push path is allowed to carry, and the
+// origin-literal pin below exempts it by name.
+const PUSH_PARSE_BASE = 'https://www.worldmonitor.app/';
+const PUSH_PARSE_BASE_ORIGIN = new URL(PUSH_PARSE_BASE).origin;
 
-function safePushClickUrl(raw) {
-  if (typeof raw !== 'string' || raw.length === 0) return PUSH_DASHBOARD_URL;
+// What we emit instead of an origin. Each service worker resolves this against
+// whichever host is serving it, so one payload works on www and on every
+// vertical subdomain.
+const PUSH_DASHBOARD_PATH = '/';
+
+// Generic aliases for "the dashboard", matched by EXACT hostname equality. The
+// vertical subdomains are deliberately absent: tech/finance/etc. are distinct
+// surfaces, so relativizing one would let another vertical's worker resolve it
+// onto itself and land the user on the wrong dashboard.
+const GENERIC_FIRST_PARTY_HOSTS = ['worldmonitor.app', 'www.worldmonitor.app'];
+
+// Paths Cloudflare serves on the apex (ARCHITECTURE.md §2). These must stay
+// absolute: relativizing /oauth/register destroys the apex origin before the
+// service worker — which can only recognize an ABSOLUTE apex URL — ever gets a
+// say, and a www redirect turns a registration POST into a GET (405, #4938).
+const APEX_SERVED_PATHS = [
+  /^\/mcp(?:\/|$)/,
+  /^\/oauth\//,
+  /^\/\.well-known\//,
+  /^\/robots\.txt$/,
+  /^\/security\.txt$/,
+];
+
+function safePushClickUrl(raw, userId) {
+  // A missing link is ordinary traffic on every plain brief_ready push, not a
+  // rejection — logging it would be noise.
+  if (typeof raw !== 'string' || raw.length === 0) return PUSH_DASHBOARD_PATH;
+
+  const reject = (reason) => {
+    console.warn(`[relay] push click URL rejected for ${userId ?? 'unknown'}: ${reason}`);
+    return PUSH_DASHBOARD_PATH;
+  };
+
   let parsed;
   try {
-    parsed = new URL(raw, PUSH_DASHBOARD_URL);
-  } catch {
-    return PUSH_DASHBOARD_URL;
+    parsed = new URL(raw, PUSH_PARSE_BASE);
+  } catch (err) {
+    return reject(`unparseable (${err.message})`);
   }
-  if (parsed.protocol !== 'https:') return PUSH_DASHBOARD_URL;
+  if (parsed.protocol !== 'https:') return reject(`scheme ${parsed.protocol}`);
   // Embedded credentials exist only to make a hostile host read as ours.
-  if (parsed.username || parsed.password) return PUSH_DASHBOARD_URL;
-  return parsed.href;
+  if (parsed.username || parsed.password) return reject('embedded credentials');
+
+  // Off-origin articles and vertical-subdomain targets stay absolute: the
+  // worker gives them their own tab, which is the point of an rss_alert.
+  if (!GENERIC_FIRST_PARTY_HOSTS.includes(parsed.hostname)) return parsed.href;
+  if (APEX_SERVED_PATHS.some((re) => re.test(parsed.pathname))) return parsed.href;
+
+  const relative = parsed.pathname + parsed.search + parsed.hash;
+  // Detaching a path from its origin is where this gets dangerous: a URL can be
+  // first-party BY HOST and still have a pathname of //evil.com, which resolves
+  // straight back off-origin. "Must not begin with //" does not catch it — the
+  // backslash spelling resolves identically without that prefix — so the only
+  // sound check is re-resolving and comparing the origin.
+  let resolved;
+  try {
+    resolved = new URL(relative, PUSH_PARSE_BASE);
+  } catch {
+    return reject('path did not survive relativization');
+  }
+  if (resolved.origin !== PUSH_PARSE_BASE_ORIGIN) {
+    return reject('first-party host with an off-origin path');
+  }
+  return relative;
 }
 
 /**
@@ -664,7 +722,7 @@ async function sendWebPush(userId, subscription, payload) {
   const body = JSON.stringify({
     title: payload.title || 'WorldMonitor',
     body: payload.body || '',
-    url: safePushClickUrl(payload.url),
+    url: safePushClickUrl(payload.url, userId),
     tag: payload.tag || 'worldmonitor-generic',
     eventType: payload.eventType,
   });
