@@ -7,9 +7,13 @@
   "totalTolerancePct": 0.25,
   "totalToleranceBytes": 16384,
   "total": {
-    "raw": 441071
+    "raw": 444351
   },
   "chunks": {
+    "analytics": {
+      "raw": 44963,
+      "files": 1
+    },
     "clerk": {
       "raw": 18229,
       "files": 1
@@ -19,7 +23,7 @@
       "files": 1
     },
     "debugbear-rum": {
-      "raw": 28203,
+      "raw": 29283,
       "files": 1
     },
     "dom-utils": {
@@ -35,7 +39,7 @@
       "files": 1
     },
     "geo-convergence": {
-      "raw": 46997,
+      "raw": 47005,
       "files": 1
     },
     "geo-distance": {
@@ -47,15 +51,15 @@
       "files": 1
     },
     "i18n": {
-      "raw": 124816,
-      "files": 2
+      "raw": 52460,
+      "files": 1
     },
     "main": {
-      "raw": 126521,
+      "raw": 128607,
       "files": 1
     },
     "runtime-config": {
-      "raw": 10228,
+      "raw": 10236,
       "files": 1
     },
     "tauri-bridge": {
@@ -63,21 +67,21 @@
       "files": 1
     },
     "theme-colors": {
-      "raw": 45192,
+      "raw": 72651,
       "files": 1
     },
     "theme-manager": {
-      "raw": 1477,
+      "raw": 1509,
       "files": 1
     }
   },
   "deferred": {
     "total": {
-      "raw": 1375671
+      "raw": 1375736
     },
     "chunks": {
       "App": {
-        "raw": 902135,
+        "raw": 902150,
         "files": 1
       },
       "base": {
@@ -85,11 +89,11 @@
         "files": 1
       },
       "cached-risk-scores": {
-        "raw": 14907,
+        "raw": 14915,
         "files": 1
       },
       "checkout": {
-        "raw": 13203,
+        "raw": 13208,
         "files": 1
       },
       "continuous": {
@@ -97,19 +101,19 @@
         "files": 1
       },
       "cross-domain-storage": {
-        "raw": 409,
+        "raw": 417,
         "files": 1
       },
       "feeds": {
-        "raw": 102203,
+        "raw": 102211,
         "files": 1
       },
       "gdelt-intel": {
-        "raw": 118416,
+        "raw": 118392,
         "files": 1
       },
       "index": {
-        "raw": 41627,
+        "raw": 41648,
         "files": 2
       },
       "layout-batch": {
@@ -125,7 +129,7 @@
         "files": 1
       },
       "persistent-cache": {
-        "raw": 3735,
+        "raw": 3743,
         "files": 1
       },
       "pinned-webcams": {
@@ -153,11 +157,11 @@
         "files": 1
       },
       "user-location": {
-        "raw": 4584,
+        "raw": 4592,
         "files": 1
       },
       "widget-store": {
-        "raw": 21651,
+        "raw": 21659,
         "files": 1
       }
     }
