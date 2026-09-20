@@ -285,7 +285,7 @@ async function drainHeldForUser(userId, variant, allowedChannelTypes) {
         ok = await sendWebPush(userId, ch, {
           title: `WorldMonitor · ${events.length} held alert${events.length === 1 ? '' : 's'}`,
           body: subject,
-          url: 'https://worldmonitor.app/',
+          url: PUSH_DASHBOARD_PATH,
           tag: `quiet_hours_batch:${userId}`,
           eventType: 'quiet_hours_batch',
         });
@@ -1062,7 +1062,7 @@ async function processWelcome(event) {
     await sendWebPush(userId, ch, {
       title: 'WorldMonitor connected',
       body: "You'll receive alerts here when events match your sensitivity settings.",
-      url: 'https://worldmonitor.app/',
+      url: PUSH_DASHBOARD_PATH,
       tag: `channel_welcome:${userId}`,
       eventType: 'channel_welcome',
     });
@@ -1369,7 +1369,7 @@ async function processEvent(event) {
           // of the formatted text as the body; the click URL points
           // at the event's link if present, else the dashboard.
           const firstLine = (deliveryText || '').split('\n')[1] || '';
-          const eventUrl = event.payload?.link || event.payload?.url || 'https://worldmonitor.app/';
+          const eventUrl = event.payload?.link || event.payload?.url || PUSH_DASHBOARD_PATH;
           await sendWebPush(rule.userId, ch, {
             title: event.payload?.title || event.eventType || 'WorldMonitor',
             body: firstLine,
