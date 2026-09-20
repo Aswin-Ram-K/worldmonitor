@@ -32,7 +32,7 @@
   function normalizeUrl(raw, origin) {
     if (typeof raw !== 'string') return null;
     var trimmed = raw.trim();
-    if (trimmed.length === 0 || trimmed.length > 2048) return null;
+    if (trimmed.length === 0) return null;
     var parsed;
     try {
       parsed = new URL(trimmed, origin);
@@ -123,8 +123,8 @@
       if (!res.ok) return null;
       return res.json().catch(function () { return null; });
     }).then(function (payload) {
-      if (payload && !payload.unavailable) storeCachedSnapshot(payload);
-      return payload;
+      if (!payload || payload.unavailable) return payload;
+      return storeCachedSnapshot(payload).then(function () { return payload; });
     }).catch(function () {
       return null;
     }).finally(function () {
@@ -140,16 +140,13 @@
       origin = null;
     }
     return readCachedSnapshot().then(function (cached) {
-      // A fresh cache hit answers synchronously — clicks must not wait on
-      // the network when the incident control is already on-device.
-      var revalidate = fetchSnapshot();
       if (cached) {
-        // Refresh in the background; the click decision uses the cached set.
-        // An unhandled rejection here would surface as an SW error ping.
-        if (revalidate && typeof revalidate.catch === 'function') revalidate.catch(function () {});
+        // A fresh cache hit answers without a network request. Once it ages
+        // past the TTL, readCachedSnapshot returns null and the click task
+        // remains alive until the replacement snapshot is stored.
         return isSuppressed(url, cached, origin);
       }
-      return revalidate.then(function (fresh) {
+      return fetchSnapshot().then(function (fresh) {
         return isSuppressed(url, fresh, origin);
       });
     }).catch(function () {

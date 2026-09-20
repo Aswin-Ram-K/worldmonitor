@@ -58,6 +58,12 @@ describe('notification link suppression matcher (#8401)', () => {
     assert.equal(isLinkSuppressed('https://evil.example.eviler.example/', p), false);
   });
 
+  it('host entry suppresses a valid URL longer than 2,048 characters', () => {
+    const p = parsed(`${HOST_ENTRY_PREFIX}evil.example`);
+    const longUrl = `https://evil.example/path?payload=${'x'.repeat(2_100)}`;
+    assert.equal(isLinkSuppressed(longUrl, p), true);
+  });
+
   it('host entry matches non-default ports (relay and SW agree)', () => {
     const p = parsed(`${HOST_ENTRY_PREFIX}evil.example`);
     assert.equal(isLinkSuppressed('https://evil.example:8443/x', p), true);

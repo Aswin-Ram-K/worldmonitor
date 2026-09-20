@@ -40,7 +40,7 @@ const HOST_ENTRY_PREFIX = 'host:';
 function normalizeSuppressedUrl(raw) {
   if (typeof raw !== 'string') return null;
   const trimmed = raw.trim();
-  if (trimmed.length === 0 || trimmed.length > 2048) return null;
+  if (trimmed.length === 0) return null;
   let parsed;
   try {
     parsed = new URL(trimmed);

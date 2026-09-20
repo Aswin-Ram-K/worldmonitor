@@ -78,7 +78,7 @@ function makeEvent(link = EVIL) {
 
 let harnessSeq = 0;
 
-function installHarness({ smembers = [], smembersOk = true, pipelineOk = true } = {}) {
+function installHarness({ smembers = [], smembersOk = true, pipelineOk = true, pipelineCommandError = false } = {}) {
   const calls = { telegram: 0, pipeline: [], smembers: 0 };
   const logs = [];
   const origLog = console.log;
@@ -123,7 +123,13 @@ function installHarness({ smembers = [], smembersOk = true, pipelineOk = true } 
       let body = [];
       try { body = JSON.parse(opts.body); } catch { /* keep empty */ }
       calls.pipeline.push(body);
-      return { ok: pipelineOk, status: pipelineOk ? 200 : 500, json: async () => [] };
+      return {
+        ok: pipelineOk,
+        status: pipelineOk ? 200 : 500,
+        json: async () => body.map((_, index) => (
+          pipelineCommandError && index === 0 ? { error: 'ERR write failed' } : { result: 1 }
+        )),
+      };
     }
     // Upstash generic REST (GET/SET for entitlement cache, dedup SET NX).
     // Dedup MUST report "new" (Upstash "OK") — the relay's fail-open
@@ -152,7 +158,12 @@ describe('notification-relay link suppression (#8401)', () => {
       const record = JSON.parse(zadds[0][3]);
       assert.equal(record.eventType, 'rss_alert');
       assert.ok(Array.isArray(record.link) && record.link[0].includes('evil.example'), 'record must carry the suppressed link');
-      assert.equal(record.suppressedChannels, 1);
+      assert.equal(record.matchedRules, 1);
+      assert.equal(record.suppressedChannels, undefined);
+      const trims = h.calls.pipeline.flat().filter((cmd) => cmd[0] === 'ZREMRANGEBYSCORE' && cmd[1] === relay.BLOCKED_LINKS_LOG_KEY);
+      assert.equal(trims.length, 1, 'must prune incident records older than the retention window');
+      assert.equal(trims[0][2], '-inf');
+      assert.ok(Number(trims[0][3]) < Number(zadds[0][2]), 'retention cutoff must precede the new record');
     } finally {
       h.restore();
     }
@@ -164,6 +175,39 @@ describe('notification-relay link suppression (#8401)', () => {
       await relay.processEvent(makeEvent('https://www.evil.example/other'));
       assert.equal(h.calls.telegram, 0, 'host-blocked link must not reach Telegram');
       assert.ok(h.logs.some((l) => l.includes('[relay][link-suppressed]')));
+    } finally {
+      h.restore();
+    }
+  });
+
+  it('drops a host-blocked URL longer than 2,048 characters', async () => {
+    const h = installHarness({ smembers: ['host:evil.example'] });
+    try {
+      await relay.processEvent(makeEvent(`https://www.evil.example/path?payload=${'x'.repeat(2_100)}`));
+      assert.equal(h.calls.telegram, 0, 'long host-blocked link must not reach Telegram');
+      assert.ok(h.logs.some((l) => l.includes('[relay][link-suppressed]')));
+    } finally {
+      h.restore();
+    }
+  });
+
+  it('keeps suppression active and warns when the incident-log request fails', async () => {
+    const h = installHarness({ smembers: [EVIL], pipelineOk: false });
+    try {
+      await relay.processEvent(makeEvent());
+      assert.equal(h.calls.telegram, 0, 'audit failure must not undo suppression');
+      assert.ok(h.logs.some((l) => l.includes('[relay][link-suppression-log-failed]')));
+    } finally {
+      h.restore();
+    }
+  });
+
+  it('warns when Upstash reports a command-level incident-log failure', async () => {
+    const h = installHarness({ smembers: [EVIL], pipelineCommandError: true });
+    try {
+      await relay.processEvent(makeEvent());
+      assert.equal(h.calls.telegram, 0);
+      assert.ok(h.logs.some((l) => l.includes('[relay][link-suppression-log-failed]')));
     } finally {
       h.restore();
     }

@@ -24,6 +24,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..');
 
 const EVIL = 'https://evil.example/phish?x=1';
+const LONG_EVIL = `https://evil.example/phish?payload=${'x'.repeat(2_100)}`;
 
 const originalFetch = globalThis.fetch;
 const originalEnvUrl = process.env.UPSTASH_REDIS_REST_URL;
@@ -48,13 +49,13 @@ describe('notification-suppressions edge endpoint (#8401)', () => {
   it('splits exact URLs and host: entries, anonymously, with a 60s cache', async () => {
     globalThis.fetch = async () => ({
       ok: true,
-      json: async () => ({ result: [EVIL, 'host:evil.example', 'garbage {{{', null, 42] }),
+      json: async () => ({ result: [EVIL, LONG_EVIL, 'host:evil.example', 'garbage {{{', null, 42] }),
     });
     const { default: handler } = await import('../api/notification-suppressions.js?edge-split');
     const res = await handler(new Request('https://worldmonitor.app/api/notification-suppressions'));
     assert.equal(res.status, 200);
     const body = await res.json();
-    assert.deepEqual(body.suppressed, [EVIL]);
+    assert.deepEqual(body.suppressed, [EVIL, LONG_EVIL]);
     assert.deepEqual(body.hosts, ['evil.example']);
     assert.ok(typeof body.updatedAt === 'string');
     assert.equal(body.unavailable, undefined);
@@ -86,7 +87,7 @@ describe('notification-suppressions edge endpoint (#8401)', () => {
 
 // ── SW check module in a vm sandbox ────────────────────────────────────
 
-function makeSwSandbox({ snapshot = null, fetchImpl = null } = {}) {
+function makeSwSandbox({ snapshot = null, fetchImpl = null, showNotificationImpl = null, cachePutImpl = null } = {}) {
   const listeners = new Map();
   const shown = [];
   const windowClients = [];
@@ -102,6 +103,7 @@ function makeSwSandbox({ snapshot = null, fetchImpl = null } = {}) {
     registration: {
       showNotification(title, opts) {
         shown.push({ title, opts });
+        if (showNotificationImpl) return showNotificationImpl(title, opts);
         return Promise.resolve();
       },
     },
@@ -114,7 +116,10 @@ function makeSwSandbox({ snapshot = null, fetchImpl = null } = {}) {
     async match() { return null; },
     async open() {
       return {
-        async put(k, v) { cacheStore.set(k, v); },
+        async put(k, v) {
+          if (cachePutImpl) await cachePutImpl(k, v);
+          cacheStore.set(k, v);
+        },
       };
     },
   };
@@ -168,6 +173,12 @@ describe('link-suppression-check.js matcher (#8401)', () => {
     assert.equal(await check.checkLinkSuppressed('https://evil.example:8443/x'), true);
   });
 
+  it('host entries suppress a valid URL longer than 2,048 characters', async () => {
+    const box = makeSwSandbox({ snapshot: { suppressed: [], hosts: ['evil.example'] } });
+    const check = box.self.wmLinkSuppression;
+    assert.equal(await check.checkLinkSuppressed(LONG_EVIL), true);
+  });
+
   it('unavailable snapshot fails open to navigation', async () => {
     const box = makeSwSandbox({ snapshot: { suppressed: [], hosts: [], unavailable: true } });
     const check = box.self.wmLinkSuppression;
@@ -199,6 +210,45 @@ describe('push-handler.js notificationclick suppression (#8401)', () => {
     assert.equal(box.opened, null, 'blocked click must not openWindow');
     assert.equal(box.shown.length, 1);
     assert.equal(box.shown[0].title, 'Link blocked by WorldMonitor');
+  });
+
+  it('never opens a blocked URL when the replacement notice rejects', async () => {
+    const box = makeSwSandbox({
+      snapshot: { suppressed: [EVIL], hosts: [] },
+      showNotificationImpl: async () => { throw new Error('notification permission changed'); },
+    });
+    const ev = notifClickEvent({ url: EVIL });
+    box.emit('notificationclick', ev);
+    for (const p of ev.waits) await p;
+    assert.equal(box.opened, null, 'blocked decision must remain terminal');
+    assert.equal(box.shown.length, 1, 'replacement notice was attempted');
+  });
+
+  it('keeps the click task alive until a fetched snapshot is stored', async () => {
+    let markPutStarted;
+    let releasePut;
+    const putStarted = new Promise((resolveStarted) => { markPutStarted = resolveStarted; });
+    const putBlocked = new Promise((resolvePut) => { releasePut = resolvePut; });
+    const box = makeSwSandbox({
+      snapshot: { suppressed: [EVIL], hosts: [] },
+      cachePutImpl: async () => {
+        markPutStarted();
+        await putBlocked;
+      },
+    });
+    const ev = notifClickEvent({ url: EVIL });
+    box.emit('notificationclick', ev);
+    await putStarted;
+
+    let settled = false;
+    ev.waits[0].then(() => { settled = true; });
+    await Promise.resolve();
+    assert.equal(settled, false, 'waitUntil must retain the cache write');
+
+    releasePut();
+    await ev.waits[0];
+    assert.equal(box.cacheStore.has('/api/notification-suppressions'), true);
+    assert.equal(box.opened, null);
   });
 
   it('clean click opens as before when nothing is blocked', async () => {

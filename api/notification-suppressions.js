@@ -31,7 +31,7 @@ const HOST_PREFIX = 'host:';
 function normalizeUrl(raw) {
   if (typeof raw !== 'string') return null;
   const trimmed = raw.trim();
-  if (trimmed.length === 0 || trimmed.length > 2048) return null;
+  if (trimmed.length === 0) return null;
   let parsed;
   try {
     parsed = new URL(trimmed);
@@ -83,7 +83,7 @@ function splitEntries(entries) {
   return { suppressed, hosts };
 }
 
-export async function readSuppressionSnapshot(fetchImpl = globalThis.fetch) {
+export async function readSuppressionSnapshot(fetchImpl = (...args) => globalThis.fetch(...args)) {
   const url = process.env.UPSTASH_REDIS_REST_URL;
   const token = process.env.UPSTASH_REDIS_REST_TOKEN;
   if (!url || !token) return { readable: false, entries: null };

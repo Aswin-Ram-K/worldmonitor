@@ -165,7 +165,7 @@ function eventLinks(event) {
   return links;
 }
 
-async function logLinkSuppression(event, channelCount, fetchImpl = fetch) {
+async function logLinkSuppression(event, matchedRuleCount, fetchImpl = fetch) {
   const record = {
     ts: Date.now(),
     eventType: event?.eventType ?? 'unknown',
@@ -173,10 +173,11 @@ async function logLinkSuppression(event, channelCount, fetchImpl = fetch) {
     title: String(event?.payload?.title ?? event?.eventType ?? '').slice(0, 160),
     source: typeof event?.payload?.source === 'string' ? event.payload.source.slice(0, 120) : '',
     link: eventLinks(event).map((l) => String(l).slice(0, 500)),
-    suppressedChannels: channelCount,
+    matchedRules: matchedRuleCount,
   };
+  const retentionCutoff = record.ts - BLOCKED_LINKS_LOG_TTL * 1000;
   try {
-    await fetchImpl(`${UPSTASH_URL}/pipeline`, {
+    const response = await fetchImpl(`${UPSTASH_URL}/pipeline`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${UPSTASH_TOKEN}`,
@@ -185,12 +186,23 @@ async function logLinkSuppression(event, channelCount, fetchImpl = fetch) {
       },
       body: JSON.stringify([
         ['ZADD', BLOCKED_LINKS_LOG_KEY, String(record.ts), JSON.stringify(record)],
+        ['ZREMRANGEBYSCORE', BLOCKED_LINKS_LOG_KEY, '-inf', String(retentionCutoff)],
         ['EXPIRE', BLOCKED_LINKS_LOG_KEY, String(BLOCKED_LINKS_LOG_TTL)],
       ]),
       signal: AbortSignal.timeout(10000),
     });
+    if (!response.ok) {
+      console.warn('[relay][link-suppression-log-failed] suppression incident record returned a non-success response');
+      return;
+    }
+    const results = await response.json().catch(() => null);
+    if (!Array.isArray(results) || results.some((entry) => entry && typeof entry === 'object' && entry.error)) {
+      console.warn('[relay][link-suppression-log-failed] suppression incident record returned a command error');
+    }
   } catch {
-    // Logging is best-effort — the suppression itself already happened.
+    // Logging is best-effort — the suppression itself already happened —
+    // but failure must be visible so operators know incident scope is partial.
+    console.warn('[relay][link-suppression-log-failed] suppression incident record could not be written');
   }
 }
 

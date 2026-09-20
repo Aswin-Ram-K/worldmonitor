@@ -87,7 +87,12 @@ self.addEventListener('notificationclick', (event) => {
         const blocked = await suppression.checkLinkSuppressed(target);
         if (blocked) {
           if (typeof self.wmShowBlockedNotice === 'function') {
-            await self.wmShowBlockedNotice(tag);
+            try {
+              await self.wmShowBlockedNotice(tag);
+            } catch {
+              // The blocked decision is terminal even when the replacement
+              // notice cannot be shown. Never fall through to the blocked URL.
+            }
           }
           return;
         }
