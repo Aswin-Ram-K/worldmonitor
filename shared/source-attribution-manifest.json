@@ -10012,7 +10012,7 @@
       "status": "excluded",
       "references": [
         {
-          "path": "src/components/PinnedWebcamsPanel.ts"
+          "path": "shared/pinned-webcams.ts"
         }
       ]
     },
@@ -10142,6 +10142,9 @@
         },
         {
           "path": "api/reverse-geocode.js"
+        },
+        {
+          "path": "api/seed-contract-probe.ts"
         },
         {
           "path": "api/story.js"
