@@ -61,7 +61,28 @@ self.addEventListener('push', (event) => {
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
   const target = (event.notification.data && event.notification.data.url) || '/';
+  const tag = (event.notification.data && event.notification.data.tag)
+    || (typeof event.notification.tag === 'string' ? event.notification.tag : '');
   event.waitUntil((async () => {
+    // Operator revoke path (#8401): an already-delivered push payload
+    // carries its URL on-device. When the operator blocks that URL after
+    // delivery, the click must not navigate to it — show the blocked
+    // notice instead. Fail-open: when the check file is absent (old SW)
+    // or the endpoint is unreachable, navigate as before.
+    try {
+      const suppression = self.wmLinkSuppression;
+      if (suppression && typeof suppression.checkLinkSuppressed === 'function') {
+        const blocked = await suppression.checkLinkSuppressed(target);
+        if (blocked) {
+          if (typeof self.wmShowBlockedNotice === 'function') {
+            await self.wmShowBlockedNotice(tag);
+          }
+          return;
+        }
+      }
+    } catch {
+      // Suppression-check failure must never strand the click.
+    }
     try {
       const all = await clients.matchAll({ type: 'window', includeUncontrolled: true });
       // If an existing window points at our origin, focus it and
