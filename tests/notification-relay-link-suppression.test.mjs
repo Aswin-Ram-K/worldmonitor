@@ -91,16 +91,26 @@ function installHarness({ smembers = [], smembersOk = true, pipelineOk = true } 
   const nonce = `t${++harnessSeq}`;
   globalThis.fetch = async (url, opts = {}) => {
     const u = String(url);
-    if (u.includes('/relay/enabled-rules')) {
+    // Route the stub by parsed hostname — never by substring. (CodeQL
+    // js/incomplete-url-substring-sanitization fires on `includes` checks
+    // against URL strings, even in test stubs.)
+    let host = '';
+    let path = '';
+    try {
+      const parsed = new URL(u);
+      host = parsed.hostname.toLowerCase();
+      path = parsed.pathname;
+    } catch { /* non-absolute URL: falls through to the Upstash default */ }
+    if (path.includes('/relay/enabled-rules')) {
       return { ok: true, json: async () => [{ userId: 'user-1', digestMode: 'realtime', eventTypes: [], sensitivity: 'all', countries: [], tickers: [], channels: ['telegram'], variant: 'full' }] };
     }
-    if (u.includes('/relay/entitlement')) {
+    if (path.includes('/relay/entitlement')) {
       return { ok: true, json: async () => ({ tier: 1 }) };
     }
-    if (u.includes('/relay/channels')) {
+    if (path.includes('/relay/channels')) {
       return { ok: true, json: async () => [{ channelType: 'telegram', verified: true, telegramOwnership: 'verified_callback', chatId: 'chat-1' }] };
     }
-    if (u.includes('api.telegram.org') && (() => { try { return new URL(u).hostname === 'api.telegram.org'; } catch { return false; } })()) {
+    if (host === 'api.telegram.org') {
       calls.telegram++;
       return { status: 200, ok: true, json: async () => ({ ok: true }) };
     }
