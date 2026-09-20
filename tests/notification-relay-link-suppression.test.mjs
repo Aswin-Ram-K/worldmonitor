@@ -100,7 +100,7 @@ function installHarness({ smembers = [], smembersOk = true, pipelineOk = true } 
     if (u.includes('/relay/channels')) {
       return { ok: true, json: async () => [{ channelType: 'telegram', verified: true, telegramOwnership: 'verified_callback', chatId: 'chat-1' }] };
     }
-    if (u.includes('api.telegram.org')) {
+    if (u.includes('api.telegram.org') && (() => { try { return new URL(u).hostname === 'api.telegram.org'; } catch { return false; } })()) {
       calls.telegram++;
       return { status: 200, ok: true, json: async () => ({ ok: true }) };
     }
