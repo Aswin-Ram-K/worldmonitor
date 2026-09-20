@@ -23,7 +23,18 @@ import {
   loadHandlerInto,
   pushEvent,
   notifClickEvent,
+  addWindowClient,
+  clickNotification,
+  PRIMARY_ORIGIN,
+  VERTICAL_ORIGIN,
+  SERVING_ORIGINS,
 } from './helpers/sw-sandbox.mjs';
+import {
+  FIRST_PARTY_PATH_LAUNDERING,
+  ORIGIN_SPOOFING_SCHEMES,
+  LOOKALIKE_HOSTS,
+  UNPARSEABLE,
+} from './fixtures/hostile-push-urls.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -372,5 +383,139 @@ describe('setWebPushChannelForUser endpoint dedupe', () => {
     // pattern. If either drifts, the review finding reappears.
     assert.match(src, /row\.endpoint === args\.endpoint/, 'setWebPushChannelForUser must compare rows by endpoint');
     assert.match(src, /await ctx\.db\.delete\(row\._id\)/, 'matching rows must be deleted before upsert');
+  });
+});
+
+// REGRESSION: the service worker must be origin-agnostic.
+//
+// The worker is served from www.worldmonitor.app and from five vertical
+// subdomains; the apex only ever 301s. But the relay stamps apex-absolute URLs
+// into payloads, so an origin comparison classifies them cross-origin and opens
+// a duplicate tab instead of reusing the dashboard — the row PR #8384's own
+// table calls "unchanged". Already-displayed notifications never expire and are
+// dispatched to whatever worker is active at click time, so the worker is the
+// only half that can fix payloads already sitting in notification centers.
+//
+// The rewrite that fixes that is also the riskiest line here: re-attaching a
+// preserved path to self.location.origin is a relativization, and a first-party
+// URL whose pathname begins `//` turns into an off-origin destination on the
+// dashboard tab. That is the exact attack the click guard exists to stop, so it
+// gets its own named case below.
+describe('push-handler.js — origin-agnostic click targets', () => {
+  const brief = '/api/brief/u/2026-09-19?t=signed-token';
+
+  for (const origin of SERVING_ORIGINS) {
+    it(`reuses the open dashboard tab for an apex-absolute target on ${origin}`, async () => {
+      const box = makeSwSandbox(origin);
+      const client = addWindowClient(box);
+      loadHandlerInto(box);
+      await clickNotification(box, { url: 'https://worldmonitor.app/dashboard' });
+      assert.equal(box.opened, null, 'must not open a second tab');
+      assert.ok(client.navigated, 'must navigate the open tab');
+      assert.equal(
+        new URL(client.navigated, origin).href,
+        `${origin}/dashboard`,
+        'must land on the serving origin',
+      );
+    });
+
+    it(`reuses the open dashboard tab for a www-absolute target on ${origin}`, async () => {
+      const box = makeSwSandbox(origin);
+      const client = addWindowClient(box);
+      loadHandlerInto(box);
+      await clickNotification(box, { url: `${PRIMARY_ORIGIN}/settings` });
+      assert.equal(box.opened, null);
+      assert.equal(new URL(client.navigated, origin).href, `${origin}/settings`);
+    });
+
+    it(`preserves query and fragment when rewriting on ${origin}`, async () => {
+      const box = makeSwSandbox(origin);
+      const client = addWindowClient(box);
+      loadHandlerInto(box);
+      await clickNotification(box, { url: `https://worldmonitor.app${brief}` });
+      assert.equal(
+        new URL(client.navigated, origin).href,
+        `${origin}${brief}`,
+        'a signed brief token must survive the rewrite',
+      );
+    });
+  }
+
+  it('never navigates the dashboard tab off-origin for a laundered first-party path', async () => {
+    for (const origin of SERVING_ORIGINS) {
+      for (const { raw, why } of FIRST_PARTY_PATH_LAUNDERING) {
+        const box = makeSwSandbox(origin);
+        const client = addWindowClient(box);
+        loadHandlerInto(box);
+        await clickNotification(box, { url: raw });
+        // The round-trip origin check fails for these, so they collapse to the
+        // dashboard rather than being rewritten. Asserting the destination's
+        // ORIGIN — not that the string lacks a `//` prefix — is the point: the
+        // backslash spelling passes a prefix check and still resolves to
+        // evil.com, so only re-resolution proves the guard held.
+        assert.equal(box.opened, null, `${raw} must not open a tab (${why})`);
+        assert.equal(client.navigated, '/', `${raw} must collapse to the dashboard (${why})`);
+        assert.equal(
+          new URL(client.navigated, origin).origin,
+          origin,
+          `navigate() must stay on-origin for ${raw}`,
+        );
+      }
+    }
+  });
+
+  it('does not rewrite a sibling vertical target onto the current origin', async () => {
+    const box = makeSwSandbox(PRIMARY_ORIGIN);
+    const client = addWindowClient(box);
+    loadHandlerInto(box);
+    await clickNotification(box, { url: `${VERTICAL_ORIGIN}/dashboard` });
+    assert.equal(client.navigated, null, 'a different surface is not ours to rewrite');
+    assert.equal(box.opened, `${VERTICAL_ORIGIN}/dashboard`, 'it gets its own tab');
+  });
+
+  it('does not rewrite apex-exempt paths that Cloudflare serves on the apex', async () => {
+    for (const path of ['/oauth/register', '/mcp', '/.well-known/api-catalog']) {
+      const box = makeSwSandbox(PRIMARY_ORIGIN);
+      const client = addWindowClient(box);
+      loadHandlerInto(box);
+      await clickNotification(box, { url: `https://worldmonitor.app${path}` });
+      assert.equal(client.navigated, null, `${path} must not be navigated onto www`);
+      assert.equal(
+        box.opened,
+        `https://worldmonitor.app${path}`,
+        `${path} is served on the apex and must keep it`,
+      );
+    }
+  });
+
+  it('collapses origin-spoofing schemes before the origin comparison', async () => {
+    for (const { raw, why } of ORIGIN_SPOOFING_SCHEMES) {
+      const box = makeSwSandbox(PRIMARY_ORIGIN);
+      const client = addWindowClient(box);
+      loadHandlerInto(box);
+      await clickNotification(box, { url: raw });
+      assert.equal(client.navigated, '/', `${raw} must collapse to the dashboard (${why})`);
+    }
+  });
+
+  it('does not rewrite lookalike hosts', async () => {
+    for (const { raw } of LOOKALIKE_HOSTS) {
+      const box = makeSwSandbox(PRIMARY_ORIGIN);
+      const client = addWindowClient(box);
+      loadHandlerInto(box);
+      await clickNotification(box, { url: raw });
+      assert.equal(client.navigated, null, `${raw} is not first-party`);
+      assert.equal(box.opened, raw, `${raw} gets its own tab`);
+    }
+  });
+
+  it('collapses unparseable targets to the dashboard', async () => {
+    for (const { raw, why } of UNPARSEABLE) {
+      const box = makeSwSandbox(PRIMARY_ORIGIN);
+      const client = addWindowClient(box);
+      loadHandlerInto(box);
+      await clickNotification(box, { url: raw });
+      assert.equal(client.navigated, '/', `${raw} must collapse (${why})`);
+    }
   });
 });

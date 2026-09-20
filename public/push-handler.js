@@ -29,6 +29,33 @@
 // email / Telegram / Slack channels already do with the link in the message.
 // Anything that is neither same-origin nor https collapses to the dashboard,
 // so a javascript: or data: target can never become a navigation.
+
+// Generic aliases for "the dashboard", matched by EXACT hostname equality —
+// never a prefix, suffix, or substring test, which would pull
+// worldmonitor.app.evil.com onto the serving origin. The vertical subdomains
+// are deliberately absent: tech/finance/etc. are distinct surfaces with their
+// own installs, so rewriting one onto another would land the user on the wrong
+// dashboard. This list does not grow when a vertical is added.
+const GENERIC_FIRST_PARTY_HOSTS = ['worldmonitor.app', 'www.worldmonitor.app'];
+
+// Paths Cloudflare serves on the apex and must NEVER be rewritten to www.
+// Mirrors ARCHITECTURE.md §2 and the APEX_SERVED list in
+// tests/agent-corpus-canonical-host.test.mjs. Dropping /mcp* breaks every
+// apex-URL MCP client; dropping /oauth/* turns a registration POST into a GET
+// and kills it with 405 (#4938). Matched against the parsed pathname, not the
+// raw target, so /oauth/../dashboard classifies by where it actually lands.
+const APEX_SERVED_PATHS = [
+  /^\/mcp(?:\/|$)/,
+  /^\/oauth\//,
+  /^\/\.well-known\//,
+  /^\/robots\.txt$/,
+  /^\/security\.txt$/,
+];
+
+function isApexServedPath(pathname) {
+  return APEX_SERVED_PATHS.some((re) => re.test(pathname));
+}
+
 function classifyClickTarget(raw) {
   const dashboard = { url: '/', crossOrigin: false };
   if (typeof raw !== 'string' || raw.length === 0) return dashboard;
@@ -41,8 +68,42 @@ function classifyClickTarget(raw) {
   // Embedded credentials (https://worldmonitor.app@evil.com/) exist only to
   // make a hostile host read as ours. No real article link carries them.
   if (parsed.username || parsed.password) return dashboard;
-  if (parsed.origin === self.location.origin) return { url: raw, crossOrigin: false };
+
+  // Scheme gate runs BEFORE the origin comparison. URL.origin for a blob:
+  // returns the INNER origin, so blob:https://www.worldmonitor.app/x would
+  // otherwise satisfy the same-origin branch and reach navigate() on the
+  // dashboard tab. The comment above claims this collapse is exhaustive; it is
+  // only true with the check in this position.
   if (parsed.protocol !== 'https:') return dashboard;
+
+  if (parsed.origin === self.location.origin) return { url: raw, crossOrigin: false };
+
+  // A generic first-party absolute means "the dashboard", so re-express it on
+  // whatever origin is actually serving this worker. This is the only half that
+  // can fix payloads already sitting in a notification center: a displayed
+  // notification never expires and its click is dispatched to whichever worker
+  // is active at click time, so the relay can no longer reach it.
+  if (
+    GENERIC_FIRST_PARTY_HOSTS.indexOf(parsed.hostname) !== -1 &&
+    !isApexServedPath(parsed.pathname)
+  ) {
+    const rewritten = parsed.pathname + parsed.search + parsed.hash;
+    // Re-attaching a preserved path to our origin is itself a relativization,
+    // and it is the dangerous one: https://worldmonitor.app//evil.com has a
+    // pathname of //evil.com, which resolves straight back off-origin — onto
+    // the open dashboard tab, which is precisely the attack this guard exists
+    // to stop. A "does not start with //" check does not catch it either, since
+    // the backslash spelling resolves the same way. Only re-resolving proves it.
+    let resolved;
+    try {
+      resolved = new URL(rewritten, self.location.origin);
+    } catch {
+      return dashboard;
+    }
+    if (resolved.origin !== self.location.origin) return dashboard;
+    return { url: resolved.href, crossOrigin: false };
+  }
+
   return { url: parsed.href, crossOrigin: true };
 }
 
