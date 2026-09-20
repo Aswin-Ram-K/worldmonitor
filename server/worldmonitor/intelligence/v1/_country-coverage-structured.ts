@@ -320,10 +320,24 @@ async function collectEarthquakes(req: StructuredRequest, box: CountryBox | null
     // Word-boundary matching via the shared country-mention matcher: a
     // substring test attributes foreign quakes to the wrong country (Nigeria
     // to Niger, Somalia to Mali, Romania to Oman, Indiana to India, South
-    // Sudan to Sudan, US-state Georgia to country Georgia). The shared
-    // matcher also scrubs known superstring exclusions (South Sudan vs Sudan,
-    // Guinea variants) before matching.
-    const mentionTerms = countryMentionTerms(req.code);
+    // Sudan to Sudan). The shared matcher also scrubs known superstring
+    // exclusions (South Sudan vs Sudan, Guinea variants) before matching.
+    //
+    // Demonyms are dropped for this call site. The shared matcher is tuned for
+    // NEWS PROSE, where "Dutch" or "Spanish" is a strong country signal; a USGS
+    // `place` is a geographic label, where it is not — "Dutch Harbor, Alaska"
+    // would ground the Netherlands, "Spanish Fork, Utah" Spain, and
+    // "Philippine Sea" / "Norwegian Sea" their respective countries. Place
+    // strings name the country or state outright, so the demonym arm only adds
+    // false positives here.
+    //
+    // NOT closed by this: an EXACT collision between a country name and a US
+    // state, i.e. "Georgia". Word boundaries cannot separate those two — the
+    // token is identical — and shared/country-mention.js has no GE exclusion
+    // (it likewise omits the "Georgian" demonym for the same ambiguity). A
+    // quake in Atlanta still matches GE on the name arm; only the bbox test
+    // distinguishes them.
+    const mentionTerms = { ...countryMentionTerms(req.code), demonyms: [] };
     const incidents: CountryTimelineIncident[] = [];
     for (const quake of response.earthquakes) {
       const matches = inBox(box, quake.location?.latitude, quake.location?.longitude)

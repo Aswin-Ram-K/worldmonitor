@@ -886,6 +886,37 @@ describe('collectStructuredIncidents — producer status', () => {
     }
   });
 
+  it('rejects demonym matches in USGS place labels', async () => {
+    // The shared matcher is tuned for news prose, where a demonym names a
+    // country. A USGS `place` is a toponym, where it does not: these five all
+    // matched once the shared matcher was wired in (the old substring test
+    // missed them), attributing Alaskan and Utah quakes to the Netherlands and
+    // Spain. collectEarthquakes drops the demonym arm for this reason.
+    const demonymTraps: Array<[string, string, string, { lat: number; lon: number }]> = [
+      ['NL', 'Netherlands', '73 km SE of Dutch Harbor, Alaska', { lat: 53.9, lon: -166.5 }],
+      ['ES', 'Spain', '10 km N of Spanish Fork, Utah', { lat: 40.1, lon: -111.65 }],
+      ['PH', 'Philippines', 'Philippine Sea', { lat: 20.0, lon: 130.0 }],
+      ['NO', 'Norway', 'Norwegian Sea', { lat: 68.0, lon: 2.0 }],
+      ['FR', 'France', '12 km SW of French Camp, California', { lat: 37.87, lon: -121.27 }],
+    ];
+    for (const [code, name, place, loc] of demonymTraps) {
+      const results = await collectStructuredIncidents({
+        ctx, code, countryName: name, cutoffMs: NOW_MS - DAY, now: NOW_MS,
+        deps: structuredDeps({
+          listEarthquakes: async () => ({ earthquakes: [{
+            id: `q-${code}`, place, magnitude: 5.2, depthKm: 10,
+            location: { latitude: loc.lat, longitude: loc.lon },
+            occurredAt: NOW_MS - 2 * HOUR, sourceUrl: '', source: 'usgs', category: '',
+          }] }),
+        } as Partial<StructuredDependencies>),
+      });
+      assert.equal(
+        find(results, 'structured:earthquakes').incidents.length, 0,
+        `${place} must not attribute to ${name} via its demonym`,
+      );
+    }
+  });
+
   it('rejects a structured record geolocated outside the country box', async () => {
     const results = await collect({
       listEarthquakes: async () => ({

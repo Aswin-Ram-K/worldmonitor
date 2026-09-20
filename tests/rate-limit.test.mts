@@ -353,6 +353,83 @@ describe('rate-limit fail-open / fail-closed posture (#3531 M9)', () => {
     });
   }
 
+  it('/api/news/v1/list-feed-digest is an explicit fail-closed endpoint policy route (#8368)', async () => {
+    // A digest rebuild fans out to 20 concurrent RSS fetches and keys by
+    // caller-controlled variant/lang, so a Redis outage must 503 rather than
+    // inherit the availability-first 600/min global fallback. Same reasoning as
+    // the sibling provider-proxy routes above, and the same reason a registry
+    // entry alone is not enough: enforce-rate-limit-policies.mjs is static-only.
+    //
+    // The gateway grants ONE exception to this — the anonymous `public=1`
+    // CDN-shielded GET shape passes { failClosed: false } so a Redis outage
+    // serves the CDN copy instead of 503ing public traffic. That is the opposite
+    // branch; this asserts the DEFAULT one, which every credentialed and
+    // non-public-shape caller takes.
+    const pathname = '/api/news/v1/list-feed-digest';
+    delete process.env.UPSTASH_REDIS_REST_URL;
+    delete process.env.UPSTASH_REDIS_REST_TOKEN;
+    const mod = await importFreshRateLimitModule();
+
+    assert.deepEqual(ENDPOINT_RATE_POLICIES[pathname], { limit: 30, window: '60 s' });
+    assert.ok(
+      pathname in FAIL_CLOSED_ENDPOINT_RATE_POLICY_REQUIRED,
+      `${pathname} must stay in the fail-closed requirement registry — a Redis outage must 503, not inherit the fail-open fallback`,
+    );
+
+    const res = await mod.checkEndpointRateLimit(
+      makeRequest({ 'cf-connecting-ip': '203.0.113.7' }),
+      pathname,
+      { 'Access-Control-Allow-Origin': 'https://worldmonitor.app' },
+    );
+
+    assert.ok(res, 'expected list-feed-digest endpoint policy to fail closed without Redis config');
+    assert.equal(res.status, 503);
+    assert.equal(res.headers.get('X-RateLimit-Mode'), 'degraded');
+
+    // ...and the sanctioned opt-out still allows the CDN-shielded shape through.
+    const openRes = await mod.checkEndpointRateLimit(
+      makeRequest({ 'cf-connecting-ip': '203.0.113.7' }),
+      pathname,
+      { 'Access-Control-Allow-Origin': 'https://worldmonitor.app' },
+      { failClosed: false },
+    );
+    assert.equal(openRes, null, 'the explicit failClosed:false opt-out must still allow the request');
+  });
+
+  for (const pathname of [
+    '/api/leads/v1/submit-contact',
+    '/api/leads/v1/register-interest',
+  ]) {
+    it(`${pathname} fails closed without Redis even though it is a PUBLIC_NO_AUTH_RPC path (#8385)`, async () => {
+      // These two are anonymous POSTs that write to Convex and send email, and
+      // they are reachable with no credential at all — which is exactly why the
+      // registry pins them fail-closed at 3/h and 5/h. They are also members of
+      // PUBLIC_NO_AUTH_RPC_PATHS, so a gateway opt-out keyed on that AUTH
+      // predicate (rather than on the CDN-shielded `public=1` SHAPE) silently
+      // removed their only per-IP bound during a Redis outage: the global
+      // fallback is skipped for any path holding an endpoint policy, and
+      // neither handler has an in-handler per-IP cap on its public path.
+      delete process.env.UPSTASH_REDIS_REST_URL;
+      delete process.env.UPSTASH_REDIS_REST_TOKEN;
+      const mod = await importFreshRateLimitModule();
+
+      assert.ok(
+        pathname in FAIL_CLOSED_ENDPOINT_RATE_POLICY_REQUIRED,
+        `${pathname} must stay in the fail-closed requirement registry`,
+      );
+
+      const res = await mod.checkEndpointRateLimit(
+        makeRequest({ 'cf-connecting-ip': '203.0.113.7' }),
+        pathname,
+        { 'Access-Control-Allow-Origin': 'https://worldmonitor.app' },
+      );
+
+      assert.ok(res, `expected ${pathname} to fail closed without Redis config`);
+      assert.equal(res.status, 503);
+      assert.equal(res.headers.get('X-RateLimit-Mode'), 'degraded');
+    });
+  }
+
   it('gateway reverse-geocode RPC is a Nominatim provider route with a matched 60/min fail-closed policy (#6432)', async () => {
     // #6432 — the second Nominatim caller. The legacy edge route carries a
     // per-IP 60/min budget (#6234); this RPC must carry the same policy or it

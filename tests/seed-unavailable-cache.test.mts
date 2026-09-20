@@ -150,7 +150,11 @@ it('keeps a partial oil snapshot over a failed section read out of HTTP caches',
     const partialBody = await partial.json();
     assert.equal(partialBody.crudeWeeks[0].stocksMb, 440);
     assert.equal(partialBody.spr, undefined);
-    assert.notEqual(partialBody.updatedAt, '', 'a partial snapshot still carries its fresh timestamp');
+    // The absent section is UNKNOWN, not empty, so the snapshot must not claim
+    // an as-of-now freshness the failed read cannot support. The no-store
+    // header stops HTTP caches; blanking updatedAt is what tells the caller,
+    // matching the two sibling failure branches in the same handler.
+    assert.equal(partialBody.updatedAt, '', 'a partial snapshot must not claim a fresh timestamp');
   } finally {
     globalThis.fetch = realFetch;
   }

@@ -2021,9 +2021,6 @@ export function createDomainGateway(
     // Confirmed paid principals use per-user buckets; other traffic uses IP.
     //
     // Google searches need their tighter upstream budget even after MCP admission.
-    // (Rate-limit lint: the sanctioned failClosed:false call site for the
-    // anonymous public=1 CDN-shielded shape lives in the endpoint-limiter
-    // block below — scripts/enforce-rate-limit-policies.mjs flags any other.)
     if (internalMcpVerified && (pathname === '/api/aviation/v1/search-google-flights'
       || pathname === '/api/aviation/v1/search-google-dates')) {
       const endpointRlResponse = await checkEndpointRateLimit(request, pathname, corsHeaders, {
@@ -2057,14 +2054,27 @@ export function createDomainGateway(
       // for every caller — the opt-out applies to the SHAPE, not to the
       // absence of credentials. Non-public shapes on this path keep the
       // fail-closed default (the digest rebuild fans out to 20 RSS fetches).
-      // (Rate-limit lint: this is the one sanctioned failClosed:false call
-      // site — scripts/enforce-rate-limit-policies.mjs flags any other.)
+      //
+      // Scoped to isPublicSharedRpcRequest — the exhaustively shape-checked
+      // GET/HEAD `public=1` predicate — and deliberately NOT to
+      // isPublicNoAuthRpc (#8385 review). That broader predicate is an AUTH
+      // classification that also covers every PUBLIC_NO_AUTH_RPC_PATHS member,
+      // including the anonymous /api/leads/v1/submit-contact and
+      // /api/leads/v1/register-interest POSTs. Those two are listed in
+      // FAIL_CLOSED_ENDPOINT_RATE_POLICY_REQUIRED at 3/h and 5/h precisely
+      // because each one writes to Convex and sends email, they have no
+      // in-handler per-IP cap (register-interest's scoped limit guards only the
+      // desktop HMAC source), and the global fallback is skipped for any path
+      // that has an endpoint policy — so opting them out left no IP-layer bound
+      // at all during a Redis outage or on a deployment with Upstash unset.
+      const isCdnShieldedPublicShape = isPublicSharedRpcRequest(request.url, request.method);
       const endpointRlResponse = isSidecarProviderLookup ? null : rateLimitPrincipalUserId
         ? await checkEndpointRateLimit(request, pathname, corsHeaders, {
             principalUserId: rateLimitPrincipalUserId,
             principalScope: isUserApiKey ? 'api_key' : 'session',
           })
-        : isPublicNoAuthRpc
+        : isCdnShieldedPublicShape
+          // rate-limit-lint: sanctioned failClosed opt-out
           ? await checkEndpointRateLimit(request, pathname, corsHeaders, { failClosed: false })
           : await checkEndpointRateLimit(request, pathname, corsHeaders);
       if (endpointRlResponse) {

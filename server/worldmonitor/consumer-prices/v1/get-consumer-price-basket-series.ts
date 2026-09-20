@@ -5,7 +5,7 @@ import type {
 
 import { getCachedJson } from '../../../_shared/redis';
 
-const DEFAULT_MARKET = 'ae';
+import { normalizeMarketCode } from './_market-code';
 const DEFAULT_BASKET = 'essentials-ae';
 const DEFAULT_RANGE = '30d';
 
@@ -15,7 +15,7 @@ export async function getConsumerPriceBasketSeries(
   _ctx: unknown,
   req: GetConsumerPriceBasketSeriesRequest,
 ): Promise<GetConsumerPriceBasketSeriesResponse> {
-  const market = req.marketCode || DEFAULT_MARKET;
+  const market = normalizeMarketCode(req.marketCode);
   const basket = req.basketSlug || DEFAULT_BASKET;
   const range = VALID_RANGES.has(req.range ?? '') ? req.range! : DEFAULT_RANGE;
 

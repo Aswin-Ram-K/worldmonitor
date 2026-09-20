@@ -177,8 +177,15 @@ export async function getOilInventories(
     } as GetOilInventoriesResponse;
     // A partial snapshot built over a failed read is not cacheable: the
     // absent section is unknown, not empty. Only a fully-confirmed read
-    // (every absent key a genuine miss) may carry a fresh timestamp.
-    if (readErrored) return markNoStoreFallbackResponse(ctx.request, response);
+    // (every absent key a genuine miss) may carry a fresh timestamp — so blank
+    // `updatedAt` alongside the no-store marking, matching the two sibling
+    // failure branches in this function. The header alone is not enough: it
+    // stops HTTP caches but never reaches the caller's rendered body, so a
+    // client (or an agent) reading `spr: undefined` beside an as-of-now stamp
+    // cannot tell "no SPR data this week" from "the SPR read just failed".
+    if (readErrored) {
+      return markNoStoreFallbackResponse(ctx.request, { ...response, updatedAt: '' });
+    }
     return response;
   } catch (err) {
     console.error('[getOilInventories] Redis read failed:', err);

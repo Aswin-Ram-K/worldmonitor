@@ -773,32 +773,15 @@ describe('backtestStock provider-work quota', () => {
       ![...redisFetch.redis.keys()].some((key) => key.startsWith('market:backtest:')),
       'a transient Yahoo failure must not write the shared backtest entry',
     );
-    assert.equal(
-      Number(redisFetch.redis.get(backtestStockProviderQuotaKey('user_pro')) || '0'),
-      0,
-    );
-  });
-
-  it('rolls back the reservation when Yahoo work throws after a cache miss', async () => {
-    // A caller-local quota failure thrown from INSIDE the fetcher (not a
-    // Yahoo outage — those now throw before reaching quota-sensitive work and
-    // are covered by the negative-cache test above) must roll the reservation
-    // back instead of consuming the daily budget.
-    process.env.UPSTASH_REDIS_REST_URL = 'https://redis.example';
-    process.env.UPSTASH_REDIS_REST_TOKEN = 'token';
-    const redisFetch = createRedisAwareBacktestFetch(mockChartPayload());
-    const { throwQuotaForTest } = await import('../server/worldmonitor/market/v1/backtest-stock.ts');
-    throwQuotaForTest.arm();
-    try {
-      const response = await backtestStock(makeBacktestCtx('user_pro'), {
-        symbol: 'AMD',
-        name: 'AMD',
-        evalWindowDays: 10,
-      });
-      assert.equal(response.available, false);
-    } finally {
-      throwQuotaForTest.disarm();
-    }
+    // This also covers the reservation rollback on a fetcher throw: the quota
+    // was reserved before computeBacktest ran, the throw unwound through the
+    // outer catch, and the budget is back to 0. (#8385 review: a separate test
+    // used to assert this by arming an exported mutable flag in the production
+    // handler to throw a quota ApiError from INSIDE the fetcher — a state
+    // production cannot reach, since a real quota failure throws from
+    // reserveProviderWork before `quotaHold.reservation` is ever assigned. The
+    // hook and that test are gone; this assertion covers the reachable path,
+    // and the 429/503 quota-rejection cases are covered above.)
     assert.equal(
       Number(redisFetch.redis.get(backtestStockProviderQuotaKey('user_pro')) || '0'),
       0,

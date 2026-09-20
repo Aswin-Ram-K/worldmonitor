@@ -103,15 +103,6 @@ function isProviderQuotaFailure(error: unknown): boolean {
     );
 }
 
-// Test-only hook: lets the rollback test throw a caller-local quota failure
-// from inside the fetcher without depending on the Yahoo stub's throw path
-// (which the negative-cache fix now reserves for genuine Yahoo outages).
-let throwQuotaForTestArmed = false;
-export const throwQuotaForTest = {
-  arm() { throwQuotaForTestArmed = true; },
-  disarm() { throwQuotaForTestArmed = false; },
-};
-
 async function reserveProviderWork(request: Request | undefined): Promise<{ rollback: () => Promise<void> } | null> {
   const userId = backtestStockQuotaUserId(request);
   // Operator enterprise keys have no user id; the 60/min fail-closed route
@@ -288,9 +279,6 @@ export const backtestStock: MarketServiceHandler['backtestStock'] = async (
     // negatively cached.
     if (historyOutcome.status !== 'success') {
       throw new Error(`[backtestStock] Yahoo history unavailable for ${symbol}`);
-    }
-    if (throwQuotaForTestArmed) {
-      throw new ApiError(429, BACKTEST_STOCK_PROVIDER_QUOTA_EXCEEDED_MESSAGE, '');
     }
     const history = historyOutcome.history;
     if (history.candles.length < MIN_REQUIRED_BARS) return null;

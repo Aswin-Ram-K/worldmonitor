@@ -47,6 +47,10 @@ const RATE_LIMIT_SRC = join(ROOT, 'server/_shared/rate-limit.ts');
 const API_EXCEPTIONS = join(ROOT, 'api/api-route-exceptions.json');
 const RUNTIME_RATE_LIMIT_DIRS = ['server', 'api'].map((dir) => join(ROOT, dir));
 const RUNTIME_SOURCE_EXTENSIONS = new Set(['.js', '.cjs', '.mjs', '.ts', '.tsx']);
+// Tag the ONE sanctioned `failClosed: false` call site carries on the line
+// directly above it. Exported so the regression test and the call site cannot
+// drift apart on the literal text.
+export const SANCTIONED_MARKER = 'rate-limit-lint: sanctioned failClosed opt-out';
 
 async function extractRateLimitPolicyModule() {
   // Dynamic import via the file URL — works under tsx (the shebang) which
@@ -153,7 +157,43 @@ function toRepoRelativePath(pathname) {
   return pathname.slice(ROOT.length).replace(/^\/+/, '');
 }
 
-function findEndpointRateLimitFailOpenOptOuts() {
+/**
+ * Pure scanner for ONE source file. Split out from the directory walk so the
+ * regression test can drive it with fixture strings instead of the real tree.
+ * Returns the fail-open findings plus how many SANCTIONED_MARKER-tagged
+ * opt-outs it saw, which the caller aggregates to enforce "exactly one".
+ */
+export function scanSourceForFailOpenOptOuts(src, relPath) {
+  const findings = [];
+  let sanctionedExemptions = 0;
+  if (!src.includes('checkEndpointRateLimit') || !src.includes('failClosed')) {
+    return { findings, sanctionedExemptions };
+  }
+
+  const failOpenLiteral = /failClosed\s*:\s*false/g;
+  const isCommentLine = (text) => /^\s*(\/\/|\*|\/\*)/.test(text);
+  const lines = src.split('\n');
+
+  for (const match of src.matchAll(failOpenLiteral)) {
+    const line = src.slice(0, match.index).split('\n').length;
+    // Prose that merely describes the opt-out is not a call site.
+    if (isCommentLine(lines[line - 1] ?? '')) continue;
+    // Only an opt-out passed to the ENDPOINT limiter nullifies the registry.
+    // The call token must be the nearest one back, within this statement.
+    const before = src.slice(0, match.index);
+    const callIdx = before.lastIndexOf('checkEndpointRateLimit');
+    if (callIdx === -1 || callIdx < before.lastIndexOf(';')) continue;
+    if (relPath.endsWith('server/gateway.ts') && (lines[line - 2] ?? '').includes(SANCTIONED_MARKER)) {
+      sanctionedExemptions += 1;
+      continue;
+    }
+    findings.push(`${relPath}:${line}`);
+  }
+
+  return { findings, sanctionedExemptions };
+}
+
+export function findEndpointRateLimitFailOpenOptOuts() {
   // The endpoint limiter is the guardrail for routes listed in
   // FAIL_CLOSED_ENDPOINT_RATE_POLICY_REQUIRED. Its helper still exposes an
   // escape hatch for tests/backcompat, but production runtime callers must not
@@ -163,34 +203,41 @@ function findEndpointRateLimitFailOpenOptOuts() {
   // to the anonymous public=1 CDN-shielded SHAPE only (caller-invariant public
   // RPCs such as list-feed-digest?variant=full&lang=en&public=1 must keep
   // serving from CDN when Redis is down — failing closed there 503s the exact
-  // traffic the shield exists for). The call site carries a marker comment;
-  // anything else opting out is a finding.
+  // traffic the shield exists for). That ONE call site carries SANCTIONED_MARKER
+  // on the line directly above it; anything else opting out is a finding.
+  //
+  // Anchoring (#8385 review): scan for the `failClosed: false` LITERAL and key
+  // the exemption on the line immediately above it. The previous version matched
+  // a whole `checkEndpointRateLimit(...)` span with a non-greedy, non-paren-
+  // balanced regex and searched a 12-before/6-after window for the marker, which
+  // had two failure modes that made the guard report zero findings for ANY new
+  // opt-out anywhere in gateway.ts:
+  //   1. The span regex ran across call sites, so a later match STARTED at an
+  //      unrelated earlier call and its window landed on the marker regardless
+  //      of where the new literal actually was.
+  //   2. `failClosed\s*:\s*false` also matched the marker COMMENT's own prose,
+  //      manufacturing a phantom match that a second marker had to suppress.
+  // Comment lines are skipped and the marker must be directly adjacent, so
+  // neither can recur. Pinned by tests/enforce-rate-limit-policies.test.mts.
   const findings = [];
-  const callWithFailOpenOptOut =
-    /checkEndpointRateLimit\s*\([\s\S]*?\{[\s\S]*?failClosed\s*:\s*false[\s\S]*?\}\s*\)/g;
+  let sanctionedExemptions = 0;
 
   for (const dir of RUNTIME_RATE_LIMIT_DIRS) {
     for (const file of listRuntimeSourceFiles(dir)) {
       if (file === RATE_LIMIT_SRC) continue;
       const src = readFileSync(file, 'utf8');
-      if (!src.includes('checkEndpointRateLimit') || !src.includes('failClosed')) continue;
-      for (const match of src.matchAll(callWithFailOpenOptOut)) {
-        const matchEndLine = src.slice(0, match.index + match[0].length).split('\n').length;
-        const line = src.slice(0, match.index).split('\n').length;
-        // The sanctioned gateway public-shape opt-out carries its marker
-        // comment on the surrounding lines; anything else is a finding. Match
-        // windows around the whole call (start and end): the regex is
-        // non-greedy across calls, so a match can START far above the
-        // failClosed:false literal it ends at.
-        const lines = src.split('\n');
-        const context = [
-          ...lines.slice(Math.max(0, line - 12), line),
-          ...lines.slice(matchEndLine - 1, matchEndLine + 6),
-        ].join('\n');
-        if (file.endsWith('server/gateway.ts') && context.includes('sanctioned failClosed')) continue;
-        findings.push(`${toRepoRelativePath(file)}:${line}`);
-      }
+      const scan = scanSourceForFailOpenOptOuts(src, toRepoRelativePath(file));
+      findings.push(...scan.findings);
+      sanctionedExemptions += scan.sanctionedExemptions;
     }
+  }
+
+  // Exactly one sanctioned site is intended. A second marked opt-out is a
+  // finding even though each one individually carries the marker.
+  if (sanctionedExemptions > 1) {
+    findings.push(
+      `server/gateway.ts: ${sanctionedExemptions} marked failClosed:false opt-outs — exactly one is sanctioned`,
+    );
   }
 
   return findings;
@@ -339,7 +386,16 @@ async function main() {
   );
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+// Only run the lint when invoked as a CLI. Without this guard, importing the
+// module to unit-test findEndpointRateLimitFailOpenOptOuts would execute the
+// whole audit and process.exit() out of the test runner.
+const isMainModule = process.argv[1]
+  ? import.meta.url === pathToFileURL(process.argv[1]).href
+  : false;
+
+if (isMainModule) {
+  main().catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
+}

@@ -410,6 +410,15 @@ export const ENDPOINT_RATE_POLICIES: Record<string, EndpointRatePolicy> = {
   // DOWN: the public shape is caller-invariant and served from CDN, so the
   // gateway passes failClosed: false for that shape (see the call site) and a
   // Redis outage serves the CDN path instead of 503ing public traffic.
+  //
+  // Budget shape: this bucket is keyed `${pathname}:${identifier}` — the query
+  // string is NOT part of the key — so all 5 variants x 27 langs (135 digest
+  // cache keys) share ONE 30/min per-IP budget. That is adequate today: the
+  // Railway relay's classify loop warms 5 combos per cycle (all lang=en,
+  // staggered), anonymous dashboard traffic rides the CDN-shielded shape, and
+  // signed-in callers get per-user buckets. Revisit if a caller ever needs to
+  // sweep many variant/lang combos from one IP in under a minute — the fix
+  // would be to fold variant/lang into the bucket key rather than raise this.
   '/api/news/v1/list-feed-digest': { limit: 30, window: '60 s' },
   // Country coverage (#7526) fans out per cache miss to two Google News RSS
   // feeds plus a live military-flights path and an ACLED window whose cache key

@@ -51,6 +51,56 @@ test('uppercase ISO-2 market codes hit the lowercase seed key', async () => {
   assert.equal(body.marketCode, 'ae');
 });
 
+test('a whitespace-only market code falls back to the default, not an empty key segment', async () => {
+  // `'  '` is truthy, so `(req.marketCode || DEFAULT_MARKET).trim()` skipped the
+  // default and built `consumer-prices:movers::30d` — a key nothing ever seeds.
+  const routes = createConsumerPricesServiceRoutes({ listConsumerPriceMovers } as ConsumerPricesServiceHandler);
+  const route = routes.find((entry) => entry.path.endsWith('/list-consumer-price-movers'))!;
+  const response = await route.handler(new Request(`https://worldmonitor.app${route.path}?market_code=%20%20&range=30d`));
+  assert.equal(response.status, 200);
+  await response.json();
+  assert.deepEqual(keys, ['consumer-prices:movers:ae:30d']);
+});
+
+test('a non-ISO market code falls back to the default instead of reaching the cache key', async () => {
+  const routes = createConsumerPricesServiceRoutes({ listConsumerPriceMovers } as ConsumerPricesServiceHandler);
+  const route = routes.find((entry) => entry.path.endsWith('/list-consumer-price-movers'))!;
+  const response = await route.handler(new Request(`https://worldmonitor.app${route.path}?market_code=not-a-country&range=30d`));
+  assert.equal(response.status, 200);
+  await response.json();
+  assert.deepEqual(keys, ['consumer-prices:movers:ae:30d']);
+});
+
+test('every consumer-prices handler normalizes the market code the same way', () => {
+  // #8385 review: the uppercase fix originally landed in list-consumer-price-movers
+  // alone, so a caller sending the OpenAPI contract's own "US" example got real
+  // movers data beside five empty stubs. All six must route through the shared
+  // normalizer; a new sibling that hand-rolls `req.marketCode || DEFAULT_MARKET`
+  // fails here rather than silently reintroducing the split.
+  const dir = new URL('../server/worldmonitor/consumer-prices/v1/', import.meta.url);
+  const handlers = [
+    'get-consumer-price-basket-series.ts',
+    'get-consumer-price-freshness.ts',
+    'get-consumer-price-overview.ts',
+    'list-consumer-price-categories.ts',
+    'list-consumer-price-movers.ts',
+    'list-retailer-price-spreads.ts',
+  ];
+  for (const name of handlers) {
+    const src = readFileSync(new URL(name, dir), 'utf8');
+    assert.match(
+      src,
+      /normalizeMarketCode\(req\.marketCode\)/,
+      `${name} must derive its market code via the shared normalizeMarketCode helper`,
+    );
+    assert.doesNotMatch(
+      src,
+      /req\.marketCode\s*\|\|\s*DEFAULT_MARKET/,
+      `${name} must not hand-roll the market-code default (case and shape bugs live there)`,
+    );
+  }
+});
+
 test('both movers producers include the public 90d range and seed metadata', () => {
   const publish = readFileSync(new URL('../consumer-prices-core/src/jobs/publish.ts', import.meta.url), 'utf8');
   const seed = readFileSync(new URL('../scripts/seed-consumer-prices.mjs', import.meta.url), 'utf8');
