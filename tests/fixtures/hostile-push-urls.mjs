@@ -29,12 +29,24 @@ export const HOSTILE_SCHEMES = [
  *
  * These are the laundering vectors: the URL reads as ours in a stored payload or
  * a log, and becomes https://evil.com/ the moment either half normalizes it.
- * Both spellings resolve identically because WHATWG treats `\` as `/` in a
- * special scheme, which is why a "must not start with //" check is not enough.
+ * Both spellings arrive as the same `//evil.com` pathname, because WHATWG
+ * normalizes `\` to `/` in a special scheme. The guards re-resolve and compare
+ * origins rather than testing the string's shape, so they are robust to any
+ * authority-shaped pathname the parser can produce.
  */
 export const FIRST_PARTY_PATH_LAUNDERING = [
   { raw: 'https://worldmonitor.app//evil.com', why: 'double-slash pathname' },
   { raw: 'https://worldmonitor.app/\\evil.com', why: 'backslash normalizes to the same authority' },
+];
+
+/**
+ * First-party by host AND authority-shaped in a way that survives the origin
+ * round-trip: '//www.worldmonitor.app/x' resolves back to us, so it is not
+ * hostile — but returning it unresolved pins the click to www even when the
+ * worker runs on a vertical, re-admitting the origin coupling.
+ */
+export const FIRST_PARTY_AUTHORITY_SHAPED = [
+  { raw: 'https://worldmonitor.app//www.worldmonitor.app/x', expectedPath: '/x', why: 'authority-shaped but first-party' },
 ];
 
 /** Inputs that make `new URL()` itself throw, even with a base supplied. */

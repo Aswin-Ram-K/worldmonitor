@@ -92,8 +92,10 @@ function classifyClickTarget(raw) {
     // and it is the dangerous one: https://worldmonitor.app//evil.com has a
     // pathname of //evil.com, which resolves straight back off-origin — onto
     // the open dashboard tab, which is precisely the attack this guard exists
-    // to stop. A "does not start with //" check does not catch it either, since
-    // the backslash spelling resolves the same way. Only re-resolving proves it.
+    // to stop. Both laundering spellings arrive as that same pathname, because
+    // the parser normalizes a backslash to a slash. We re-resolve and compare
+    // origins rather than testing the string's shape, because that is robust to
+    // ANY pathname the parser can produce, not just the ones we thought to list.
     let resolved;
     try {
       resolved = new URL(rewritten, self.location.origin);

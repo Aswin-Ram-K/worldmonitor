@@ -26,6 +26,7 @@ import { createRequire } from 'node:module';
 import Module from 'node:module';
 import {
   FIRST_PARTY_PATH_LAUNDERING,
+  FIRST_PARTY_AUTHORITY_SHAPED,
   UNPARSEABLE,
   HOSTILE_SCHEMES,
   LOOKALIKE_HOSTS,
@@ -105,6 +106,13 @@ describe('safePushClickUrl', () => {
     // /oauth/* turned into a www redirect makes a registration POST a GET (405,
     // #4938). Relativizing would destroy the apex origin before the worker,
     // which can only recognize an ABSOLUTE apex URL, ever gets a say.
+    // Matched against the NORMALIZED pathname, so a dot-segment that escapes an
+    // exempt prefix is classified by where it actually lands.
+    assert.equal(
+      safePushClickUrl('https://worldmonitor.app/oauth/../dashboard', 'user_abc'),
+      '/dashboard',
+      'a dot-segment escaping an exempt prefix is not apex-served',
+    );
     for (const path of ['/mcp', '/oauth/register', '/.well-known/api-catalog', '/robots.txt']) {
       assert.equal(
         safePushClickUrl(`https://worldmonitor.app${path}`),
@@ -123,9 +131,9 @@ describe('safePushClickUrl', () => {
   it('does not launder a first-party URL into an off-origin link', () => {
     // These are first-party BY HOST but their pathname is //evil.com, so
     // stripping the origin emits a protocol-relative reference. Asserting the
-    // re-resolved ORIGIN is the point: the backslash spelling does not start
-    // with `//` and still resolves to evil.com, so a prefix check passes while
-    // the guard is bypassed.
+    // re-resolved ORIGIN is the point: both spellings arrive as the same
+    // `//evil.com` pathname, and comparing the resolved origin is robust to any
+    // authority-shaped pathname rather than to an enumerated string shape.
     for (const { raw, why } of FIRST_PARTY_PATH_LAUNDERING) {
       const out = safePushClickUrl(raw);
       for (const origin of SERVING_ORIGINS) {
@@ -134,6 +142,20 @@ describe('safePushClickUrl', () => {
           origin,
           `${raw} (${why}) resolved off-origin as ${out}`,
         );
+      }
+    }
+  });
+
+  it('returns a resolved path, never an authority-shaped one', () => {
+    // '//www.worldmonitor.app/x' is first-party and survives the origin
+    // round-trip, so it is not rejected — but emitting it unresolved would pin
+    // the click to www even for a worker running on a vertical, re-admitting
+    // the origin coupling this function exists to remove.
+    for (const { raw, expectedPath, why } of FIRST_PARTY_AUTHORITY_SHAPED) {
+      const out = safePushClickUrl(raw, 'user_abc');
+      assert.equal(out, expectedPath, `${raw} (${why}) must emit a resolved path`);
+      for (const origin of SERVING_ORIGINS) {
+        assert.equal(new URL(out, origin).origin, origin, `${out} must stay on the serving origin`);
       }
     }
   });
@@ -272,9 +294,26 @@ describe('push path carries no origin literal', () => {
     assert.ok(send, 'sendWebPush must exist');
     regions.sendWebPush = send[0];
 
-    const calls = src.match(/sendWebPush\([^)]*?,\s*\{[\s\S]*?\n\s*\}\)/g) ?? [];
-    assert.ok(calls.length >= 3, `expected the three sendWebPush call sites, saw ${calls.length}`);
-    calls.forEach((c, i) => { regions[`callSite${i + 1}`] = c; });
+    // Each call site plus the lines that BUILD its url. Windows are sliced by
+    // line index rather than matched by a regex with a fixed-width prefix,
+    // because adjacent windows overlap and a global regex silently skips the
+    // overlap — which is how the first attempt at this found only 2 of 3.
+    //
+    // The window must reach BACKWARDS: the per-event fallback assigns
+    // `const eventUrl = ...` on its own line above the call, so an
+    // argument-object-only capture misses the exact line U2 fixed. Verified:
+    // restoring the apex literal there left all 20 tests green.
+    const lines = src.split('\n');
+    const callLines = [];
+    lines.forEach((line, i) => {
+      // Skip the declaration — its body is already its own region above.
+      if (/function sendWebPush\(/.test(line)) return;
+      if (/sendWebPush\(/.test(line)) callLines.push(i);
+    });
+    assert.equal(callLines.length, 3, `expected exactly three sendWebPush call sites, saw ${callLines.length}`);
+    callLines.forEach((idx, i) => {
+      regions[`callSite${i + 1}`] = lines.slice(Math.max(0, idx - 10), idx + 12).join('\n');
+    });
     return regions;
   }
 
@@ -297,17 +336,27 @@ describe('push path carries no origin literal', () => {
     }
   });
 
-  it('fails when a literal is reintroduced into any region', () => {
-    // Proves the assertion above is not vacuous: each region, injected
-    // independently, must trip it.
+  it('catches a literal reintroduced at any of the real removal sites', () => {
+    // Poison the SOURCE and re-extract, rather than appending to an already
+    // extracted region. The old form appended the literal and then asserted the
+    // result contained it — true for any region, including an empty one, so it
+    // proved nothing about region coverage. This form fails whenever a region
+    // is missing or too narrow, which is the property being claimed.
     const src = relaySource();
-    for (const [name, region] of Object.entries(pushPathRegions(src))) {
-      const poisoned = `${region}\n// url: 'https://worldmonitor.app/'`;
-      assert.match(
-        poisoned.replace(/const PUSH_PARSE_BASE = '[^']*';/, ''),
-        ORIGIN_LITERAL,
-        `${name} region must be large enough to catch a reintroduced literal`,
-      );
+    const removalSites = [
+      'url: PUSH_DASHBOARD_PATH,',
+      "const eventUrl = event.payload?.link || event.payload?.url || PUSH_DASHBOARD_PATH;",
+    ];
+    for (const site of removalSites) {
+      assert.ok(src.includes(site), `removal site must still exist in source: ${site}`);
+      const poisonedSrc = src.replace(site, site.replace('PUSH_DASHBOARD_PATH', "'https://worldmonitor.app/'"));
+      assert.notEqual(poisonedSrc, src, `poisoning must change the source for: ${site}`);
+
+      const regions = pushPathRegions(poisonedSrc);
+      const caught = Object.values(regions).some((region) => ORIGIN_LITERAL.test(
+        region.replace(/const PUSH_PARSE_BASE = '[^']*';/, ''),
+      ));
+      assert.ok(caught, `a literal reintroduced at "${site}" must be inside a scanned region`);
     }
   });
 

@@ -34,6 +34,8 @@ import {
   ORIGIN_SPOOFING_SCHEMES,
   LOOKALIKE_HOSTS,
   UNPARSEABLE,
+  HOSTILE_SCHEMES,
+  rawsOf,
 } from './fixtures/hostile-push-urls.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -207,14 +209,12 @@ describe('push-handler.js — off-origin click targets', () => {
     ['//example.com/wm-verify-account', 'https://example.com/wm-verify-account'],
     ['https://worldmonitor.app.evil.com/', 'https://worldmonitor.app.evil.com/'],
   ];
-  // Not same-origin, not plain https, or carrying credentials purely to make
-  // a hostile host read as ours — these can never become a navigation.
-  const REJECTED = [
-    'javascript:alert(1)',
-    'data:text/html,<script>1</script>',
-    'http://example.com/',
-    'https://worldmonitor.app@example.com/',
-  ];
+  // Not same-origin, not plain https, or carrying credentials purely to make a
+  // hostile host read as ours — these can never become a navigation. Taken from
+  // the shared corpus, not copied: this suite introduced that fixture to stop
+  // the two suites drifting, so keeping a local list here would preserve
+  // exactly the drift the fixture exists to remove.
+  const REJECTED = rawsOf(HOSTILE_SCHEMES);
 
   it('opens an off-origin article in a NEW tab instead of navigating the dashboard', async () => {
     for (const [raw, expected] of OFF_ORIGIN) {
@@ -506,6 +506,16 @@ describe('push-handler.js — origin-agnostic click targets', () => {
   });
 
   it('does not rewrite apex-exempt paths that Cloudflare serves on the apex', async () => {
+    // Matched against the NORMALIZED pathname, so a dot-segment escaping an
+    // exempt prefix is classified by where it actually lands, not how it reads.
+    {
+      const box = makeSwSandbox(PRIMARY_ORIGIN);
+      const client = addWindowClient(box);
+      loadHandlerInto(box);
+      await clickNotification(box, { url: 'https://worldmonitor.app/oauth/../dashboard' });
+      assert.equal(box.opened, null, 'a dot-segment escaping /oauth/ is not apex-served');
+      assert.equal(client.navigated, `${PRIMARY_ORIGIN}/dashboard`);
+    }
     for (const path of ['/oauth/register', '/mcp', '/.well-known/api-catalog']) {
       const box = makeSwSandbox(PRIMARY_ORIGIN);
       const client = addWindowClient(box);
@@ -569,6 +579,10 @@ describe('push-handler.js — apex exemption list stays in sync', () => {
 
     const guard = patternsIn(read('./agent-corpus-canonical-host.test.mjs'), 'APEX_SERVED');
     const worker = patternsIn(read('../public/push-handler.js'), 'APEX_SERVED_PATHS');
+    // THREE copies exist, not two: the corpus guard, the worker, and the relay.
+    // Binding only two left the relay's free to drift, reproducing the #4938
+    // POST-to-GET 405 on the half that talks to push services.
+    const relay = patternsIn(read('../scripts/notification-relay.cjs'), 'APEX_SERVED_PATHS');
 
     assert.ok(guard.length >= 5, 'the corpus guard must still carry the exemption list');
     assert.deepEqual(
@@ -576,5 +590,28 @@ describe('push-handler.js — apex exemption list stays in sync', () => {
       guard,
       'public/push-handler.js must exempt exactly the paths Cloudflare serves on the apex',
     );
+    assert.deepEqual(
+      relay,
+      guard,
+      'scripts/notification-relay.cjs must exempt exactly the same paths',
+    );
+  });
+
+  it('keeps the generic first-party host list identical across both halves', () => {
+    // The other duplicated policy, and the one that decides what counts as
+    // "the dashboard". It had no guard at all: if one side gained a host the
+    // other did not, the relay would relativize a target the worker refuses to
+    // rewrite — the two halves silently disagreeing, which is the bug class
+    // this whole change exists to remove.
+    const read = (rel) => readFileSync(resolve(__dirname, rel), 'utf-8');
+    const hostsIn = (src) => {
+      const block = src.match(/GENERIC_FIRST_PARTY_HOSTS\s*=\s*\[([^\]]*)\]/);
+      assert.ok(block, 'GENERIC_FIRST_PARTY_HOSTS must exist');
+      return (block[1].match(/'[^']+'/g) ?? []).map((h) => h.replace(/'/g, '')).sort();
+    };
+    const worker = hostsIn(read('../public/push-handler.js'));
+    const relay = hostsIn(read('../scripts/notification-relay.cjs'));
+    assert.ok(worker.length >= 2, 'the worker must carry the generic host list');
+    assert.deepEqual(relay, worker, 'both halves must agree on what "the dashboard" means');
   });
 });

@@ -690,9 +690,11 @@ function safePushClickUrl(raw, userId) {
   const relative = parsed.pathname + parsed.search + parsed.hash;
   // Detaching a path from its origin is where this gets dangerous: a URL can be
   // first-party BY HOST and still have a pathname of //evil.com, which resolves
-  // straight back off-origin. "Must not begin with //" does not catch it — the
-  // backslash spelling resolves identically without that prefix — so the only
-  // sound check is re-resolving and comparing the origin.
+  // straight back off-origin. Both laundering spellings arrive here as that
+  // same pathname, because the parser normalizes a backslash to a slash. We
+  // re-resolve and compare origins rather than testing the string's shape,
+  // because that is robust to ANY pathname the parser can produce — including
+  // authority-shaped ones a prefix test would have to enumerate.
   let resolved;
   try {
     resolved = new URL(relative, PUSH_PARSE_BASE);
@@ -702,7 +704,14 @@ function safePushClickUrl(raw, userId) {
   if (resolved.origin !== PUSH_PARSE_BASE_ORIGIN) {
     return reject('first-party host with an off-origin path');
   }
-  return relative;
+  // Return the RE-RESOLVED path, not the string we validated. They differ when
+  // the pathname is itself authority-shaped: '//www.worldmonitor.app/x' passes
+  // the origin check (it resolves back to us) but, handed to a worker on a
+  // vertical subdomain, re-resolves to www and pins the click off that
+  // worker's own origin — re-admitting the very coupling this emits relative
+  // paths to avoid. public/push-handler.js returns resolved.href for the same
+  // reason.
+  return resolved.pathname + resolved.search + resolved.hash;
 }
 
 /**
