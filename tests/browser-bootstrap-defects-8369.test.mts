@@ -33,6 +33,7 @@ import {
 import {
   DEBUGBEAR_RUM_ERROR_QUEUE_MAX,
   initDebugBearRum,
+  reportBootstrapTransferRum,
   resetDebugBearRumForTesting,
   snapshotRumError,
 } from '../src/bootstrap/debugbear-rum.ts';
@@ -47,6 +48,8 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = resolve(__dirname, '..');
 const themeManagerSrc = readFileSync(resolve(root, 'src/utils/theme-manager.ts'), 'utf8');
 const exportSrc = readFileSync(resolve(root, 'src/utils/export.ts'), 'utf8');
+const liveChannelsMainSrc = readFileSync(resolve(root, 'src/live-channels-main.ts'), 'utf8');
+const liveChannelsHtmlSrc = readFileSync(resolve(root, 'live-channels.html'), 'utf8');
 
 describe('#8369-1 Vercel Analytics URL redaction', () => {
   it('strips checkout secrets, invite tokens, referral, and Clerk params', () => {
@@ -323,12 +326,27 @@ describe('#8369-3 DebugBear RUM bounded error buffer', () => {
     const h = installHarness('www.worldmonitor.app');
     try {
       initDebugBearRum();
+      reportBootstrapTransferRum({
+        tier: 'fast',
+        outcome: 'complete',
+        duration_ms: 125,
+        decoded_bytes: 1_000,
+        encoded_bytes: 500,
+        device_class: 'desktop',
+      });
       for (let i = 0; i < DEBUGBEAR_RUM_ERROR_QUEUE_MAX + 10; i++) {
         h.listeners.get('error')!({ type: 'error', message: `e${i}` } as unknown as Event);
       }
       const queue = h.win.dbbRum as unknown[][];
       assert.equal(queue.length, DEBUGBEAR_RUM_ERROR_QUEUE_MAX);
       assert.deepEqual(queue[0]![0], 'presampling');
+      assert.ok(queue.some(([kind]) => kind === 'metric1'), 'bootstrap metrics survive saturation');
+      assert.ok(queue.some(([kind]) => kind === 'tag3'), 'bootstrap tags survive saturation');
+      const messages = queue
+        .filter(([kind]) => kind === 'error')
+        .map(([, value]) => (value as { message: string }).message);
+      assert.ok(!messages.includes('e0'), 'the oldest error is evicted first');
+      assert.ok(messages.includes(`e${DEBUGBEAR_RUM_ERROR_QUEUE_MAX + 9}`), 'the newest error is retained');
     } finally {
       h.restore();
     }
@@ -614,5 +632,18 @@ describe('#8369-5 theme-manager auto preference persistence', () => {
     assert.match(mobileNav, /setThemePreference\(next\)/);
     assert.doesNotMatch(mobileNav, /[^a-zA-Z]setTheme\(next\)/);
     assert.match(searchManager, /setTheme: \(theme: 'dark' \| 'light'\) => setThemePreference\(theme\)/);
+  });
+
+  it('standalone channel management resolves stored auto before its first async work', () => {
+    const applyIndex = liveChannelsMainSrc.indexOf('applyStoredTheme();');
+    const i18nIndex = liveChannelsMainSrc.indexOf('await initI18n(');
+    assert.ok(applyIndex >= 0, 'standalone entry applies the shared stored preference');
+    assert.ok(i18nIndex > applyIndex, 'theme is applied before waiting for translations');
+    assert.match(liveChannelsHtmlSrc, /t==='auto'/, 'prepaint recognizes the stored auto value');
+    assert.match(
+      liveChannelsHtmlSrc,
+      /prefers-color-scheme: light/,
+      'prepaint resolves auto against the OS before module startup',
+    );
   });
 });
