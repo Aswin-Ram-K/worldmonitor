@@ -117,60 +117,84 @@ const SENSITIVE_ANALYTICS_HASH_RE = /^(token|access_token|id_token|refresh_token
 /**
  * Params safe to strip from the live URL at boot: read by nobody.
  * handleCheckoutReturn() only DELETES email/license_key (never branches on
- * them), and no other deferred consumer reads Clerk handshake material —
- * so removing these before analytics/RUM init cannot break referral
+ * them), so removing these before analytics/RUM init cannot break referral
  * capture, checkout-intent resume, the invite acceptor, or Dodo returns.
+ *
+ * `__clerk*` is deliberately NOT here. The Clerk SDK reads its own params off
+ * `window.location.href` when it loads, and it loads LATE — scheduleClerkLoad
+ * defers it to requestIdleCallback, long after this runs synchronously at
+ * main.ts module scope. Verified against the shipped @clerk/clerk-js bundle:
+ * `__clerk_status` / `__clerk_created_session` (email-link verification) and
+ * `__clerk_ticket` (ticket sign-in/up) are read with no dev/prod/satellite
+ * gating, so stripping them here breaks those flows on the production primary
+ * domain. Only `__clerk_db_jwt` is dev-instance-gated, and `__clerk_handshake`
+ * is only ever deleted by the SDK, never read.
+ *
+ * Clerk params are still kept out of telemetry: SENSITIVE_ANALYTICS_QUERY_RE
+ * redacts `__clerk[a-z_]*` per-event in beforeSend, which is the vector this
+ * boot strip was reaching for. The live URL must be left alone.
  */
-const STRIPPABLE_AT_BOOT_RE = /^(email|license_key|licensekey|__clerk[a-z_]*)$/i;
+const STRIPPABLE_AT_BOOT_RE = /^(email|license_key|licensekey)$/i;
 
-function scrubUrlSearchParams(parsed: URL, pattern: RegExp): boolean {
+/** Delete every key matching `pattern`. The single place that decides what
+ * "sensitive" means, so a caller's key list can never be silently ignored by
+ * one of several copies of this loop. */
+function scrubParams(params: URLSearchParams, pattern: RegExp): boolean {
   let changed = false;
-  for (const key of [...parsed.searchParams.keys()]) {
+  for (const key of [...params.keys()]) {
     if (pattern.test(key)) {
-      parsed.searchParams.delete(key);
+      params.delete(key);
       changed = true;
     }
   }
   return changed;
 }
 
+function scrubUrlSearchParams(parsed: URL, pattern: RegExp): boolean {
+  return scrubParams(parsed.searchParams, pattern);
+}
+
 /** Scrub secret-bearing key=value pairs from a hash fragment, covering both
  * `#head?k=v` and OAuth-style `#k=v&k2=v2` shapes. Returns the scrubbed
- * fragment (without the leading #), or null when nothing was sensitive. */
-function scrubHashFragment(fragment: string): string | null {
+ * fragment (without the leading #), or null when nothing was sensitive.
+ *
+ * `pattern` is the CALLER's key list, not a hardcoded one: the boot-time
+ * strip deliberately uses a much narrower list than the analytics redaction,
+ * and hardcoding the analytics list here made the boot strip delete
+ * fragment-carried params its own contract promises to preserve. */
+function scrubHashFragment(fragment: string, pattern: RegExp): string | null {
   const qIndex = fragment.indexOf('?');
   if (qIndex >= 0) {
     const head = fragment.slice(0, qIndex);
     const hashParams = new URLSearchParams(fragment.slice(qIndex + 1));
-    let hashChanged = false;
-    for (const key of [...hashParams.keys()]) {
-      if (SENSITIVE_ANALYTICS_QUERY_RE.test(key) || SENSITIVE_ANALYTICS_HASH_RE.test(key)) {
-        hashParams.delete(key);
-        hashChanged = true;
-      }
-    }
-    if (!hashChanged) return null;
+    if (!scrubParams(hashParams, pattern)) return null;
     const rebuilt = hashParams.toString();
     return rebuilt ? `${head}?${rebuilt}` : head;
   }
   // No '?' — OAuth implicit-flow style `#access_token=..&token_type=..`.
   if (!fragment.includes('=') && !fragment.includes('&')) {
-    return SENSITIVE_ANALYTICS_HASH_RE.test(fragment) ? '' : null;
+    return pattern.test(fragment) ? '' : null;
   }
   const hashParams = new URLSearchParams(fragment);
-  let hashChanged = false;
-  for (const key of [...hashParams.keys()]) {
-    if (SENSITIVE_ANALYTICS_QUERY_RE.test(key) || SENSITIVE_ANALYTICS_HASH_RE.test(key)) {
-      hashParams.delete(key);
-      hashChanged = true;
-    }
-  }
-  return hashChanged ? hashParams.toString() : null;
+  return scrubParams(hashParams, pattern) ? hashParams.toString() : null;
 }
+
+/** Key list for the analytics hash path: the query list plus the hash-only
+ * additions. Built once so the two regexes cannot drift apart at a call site. */
+const SENSITIVE_ANALYTICS_HASH_COMBINED_RE = new RegExp(
+  `(${SENSITIVE_ANALYTICS_QUERY_RE.source})|(${SENSITIVE_ANALYTICS_HASH_RE.source})`,
+  'i',
+);
 
 export function redactAnalyticsUrl(event: BeforeSendEvent): BeforeSendEvent {
   const raw = event.url;
   if (typeof raw !== 'string' || raw.length === 0) return event;
+  // Decide the output shape from the INPUT, not the serialized output. A
+  // browser always has window.location.origin set and production event.url is
+  // an absolute same-origin URL, so testing the output's prefix made the
+  // rewrite fire on every redacted event — reporting exactly the events that
+  // carried a secret with a path-only URL while clean events stayed absolute.
+  const wasAbsolute = /^[a-z][a-z0-9+.-]*:/i.test(raw) || raw.startsWith('//');
   let parsed: URL;
   try {
     // Relative analytics URLs resolve against the current origin in the
@@ -185,7 +209,7 @@ export function redactAnalyticsUrl(event: BeforeSendEvent): BeforeSendEvent {
   }
   let changed = scrubUrlSearchParams(parsed, SENSITIVE_ANALYTICS_QUERY_RE);
   if (parsed.hash) {
-    const scrubbed = scrubHashFragment(parsed.hash.slice(1));
+    const scrubbed = scrubHashFragment(parsed.hash.slice(1), SENSITIVE_ANALYTICS_HASH_COMBINED_RE);
     if (scrubbed !== null) {
       parsed.hash = scrubbed ? `#${scrubbed}` : '';
       changed = true;
@@ -193,10 +217,12 @@ export function redactAnalyticsUrl(event: BeforeSendEvent): BeforeSendEvent {
   }
   if (!changed) return event;
   const redacted = parsed.toString();
-  // Strip the parse-only base when the test path resolved a relative URL
-  // against the current origin — absolute production URLs pass through.
+  // Strip the parse-only base ONLY when the incoming url was itself relative,
+  // so a redacted event keeps the same shape as an unredacted one.
   const origin = typeof window !== 'undefined' ? window.location.origin : '';
-  const url = origin && redacted.startsWith(origin) ? redacted.slice(origin.length) || '/' : redacted;
+  const url = !wasAbsolute && origin && redacted.startsWith(origin)
+    ? redacted.slice(origin.length) || '/'
+    : redacted;
   return { ...event, url };
 }
 
@@ -220,7 +246,7 @@ export function stripSensitiveParamsFromUrl(): void {
   }
   let changed = scrubUrlSearchParams(url, STRIPPABLE_AT_BOOT_RE);
   if (url.hash) {
-    const scrubbed = scrubHashFragment(url.hash.slice(1));
+    const scrubbed = scrubHashFragment(url.hash.slice(1), STRIPPABLE_AT_BOOT_RE);
     if (scrubbed !== null) {
       url.hash = scrubbed ? `#${scrubbed}` : '';
       changed = true;
@@ -232,8 +258,21 @@ export function stripSensitiveParamsFromUrl(): void {
     + url.hash;
   try {
     window.history.replaceState({}, '', clean);
-  } catch {
-    // History API unavailable (extreme embed/iframe cases).
+  } catch (error) {
+    // History API unavailable (extreme embed/iframe cases). This is the one
+    // failure that silently defeats the strip — the secrets stay in the live
+    // URL and RUM reads them — so it must leave a trace rather than a guess.
+    // enqueueSentryCall buffers until Sentry initialises, so this is safe on
+    // the boot path.
+    void import('@/bootstrap/sentry-defer')
+      .then(({ enqueueSentryCall }) => {
+        enqueueSentryCall((s) => {
+          s.captureException(error, { tags: { kind: 'boot_url_strip_failed' } });
+        });
+      })
+      .catch(() => {
+        // Reporting is best-effort; never let it break boot.
+      });
   }
 }
 

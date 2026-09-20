@@ -8,6 +8,7 @@ import { setTrustedHtml, trustedHtml } from '@/utils/dom-utils';
 import { showToast } from '@/utils/toast';
 import { buildDataReportDocument, printReportDocument, sanitizeExportData } from '@/utils/export-report';
 import { SUPPORTED_EXPORT_FORMATS, type DataExportFormat } from '@/services/gates/export-resolver';
+import { csvRow, sanitizeCsvField } from '@/utils/csv-escape';
 
 // Iran-events domain sunset (war ended 2026-07). Default OFF: omit the IRAN
 // EVENTS CSV block. Set VITE_ENABLE_IRAN_ATTACKS=true to restore. Guarded so
@@ -732,25 +733,9 @@ export function exportCountryBriefCSV(data: CountryBriefExport): void {
   downloadFile(lines.join('\n'), `country-brief-${data.code}-${timestamp}.csv`, 'text/csv');
 }
 
-/**
- * OWASP CSV Injection guard: a quoted cell that still starts with =, +, -,
- * @, tab, CR, LF, or | is treated as a formula/DDE by Excel, LibreOffice,
- * and Sheets. Quoting/escaping embedded quotes is not enough for
- * third-party RSS/intel strings and user-typed monitor keywords, so prefix
- * the dangerous first character with a single quote (the standard
- * spreadsheet escape, inert for legitimate text). Runs before quoting so
- * the quote wraps the escaped value.
- */
-const CSV_FORMULA_PREFIX_RE = /^[=+\-@\t\r\n|]/;
-
-export function sanitizeCsvField(value: string | null | undefined): string {
-  const text = value == null ? '' : String(value);
-  return CSV_FORMULA_PREFIX_RE.test(text) ? `'${text}` : text;
-}
-
-function csvRow(values: string[]): string {
-  return values.map(v => `"${sanitizeCsvField(v || '').replace(/"/g, '""')}"`).join(',');
-}
+// Re-exported for existing importers; the implementation lives in the leaf
+// module so its regression tests can import the shipped function directly.
+export { sanitizeCsvField };
 
 function downloadFile(content: string, filename: string, mimeType: string): void {
   const blob = new Blob([content], { type: mimeType });

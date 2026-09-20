@@ -145,10 +145,13 @@ describe('DebugBear RUM loader', () => {
       h.listeners.get('unhandledrejection')!(rejectionEvent);
       // #8369: the queue holds primitive snapshots, never live Event objects
       // (unbounded retention), so assert the snapshot shape, not identity.
+      // The shape is dictated by the collector's decoder: `timeStamp` is read
+      // unconditionally, and a PRESENT `reason` (even '') shadows `message`,
+      // so a plain error must carry no `reason` key at all.
       assert.deepEqual(h.win.dbbRum, [
         ['presampling', DEBUGBEAR_RUM_SAMPLE_RATE],
-        ['error', { type: 'error', message: 'boom', filename: 'a.js', lineno: 1, colno: 2, reason: '' }],
-        ['unhandledrejection', { type: 'unhandledrejection', message: '', filename: '', lineno: 0, colno: 0, reason: 'rejected' }],
+        ['error', { type: 'error', timeStamp: 0, message: 'boom', filename: 'a.js', lineno: 1, colno: 2 }],
+        ['unhandledrejection', { type: 'unhandledrejection', timeStamp: 0, message: '', filename: '', lineno: 0, colno: 0, reason: 'rejected' }],
       ]);
       assert.ok(!(h.win.dbbRum?.[1]?.[1] instanceof Event));
     } finally {

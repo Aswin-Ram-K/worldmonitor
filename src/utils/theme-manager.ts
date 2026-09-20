@@ -76,18 +76,16 @@ export function getCurrentTheme(): Theme {
 }
 
 /**
- * Set the active theme: update DOM attribute, invalidate color cache,
- * update meta theme-color, and dispatch event. Deliberately does NOT persist
- * to localStorage — persistence is owned by setThemePreference() (explicit
- * 'auto' | 'dark' | 'light' choice) so an 'auto' preference is never
- * clobbered by its resolved value. Direct UI toggles that used to call
- * setTheme() now persist through setThemePreference() instead.
+ * Apply the effective theme without touching the stored preference: update
+ * DOM attribute, invalidate color cache, update meta theme-color, dispatch
+ * event.
+ *
+ * There is deliberately no `setTheme` export any more. It used to persist,
+ * and leaving a same-name, same-signature wrapper that silently no longer
+ * does would reintroduce the exact bug this split fixes the moment someone
+ * reached for the familiar name. To CHANGE the theme, call
+ * setThemePreference() — it owns persistence and the auto listener.
  */
-export function setTheme(theme: Theme): void {
-  applyTheme(theme);
-}
-
-/** Apply the effective theme without touching the stored preference. */
 function applyTheme(theme: Theme): void {
   document.documentElement.dataset.theme = theme;
   invalidateColorCache();
@@ -125,9 +123,16 @@ export function applyStoredTheme(): void {
 
   document.documentElement.dataset.theme = effective;
   updateThemeMetaColor(effective, variant);
-  // A stored 'auto' preference needs its matchMedia listener after reload —
+  // An 'auto' preference needs its matchMedia listener after reload —
   // setThemePreference() attaches it on change, but that never runs on boot.
-  if (raw === 'auto') attachAutoListener();
+  // This covers IMPLICIT auto too: with nothing stored, getThemePreference()
+  // reports 'auto' and the settings UI shows Auto preselected, so those users
+  // must follow an OS scheme change exactly like someone who picked it
+  // explicitly. Happy is excluded because it pins light above, matching the
+  // `effective` branches.
+  if (raw === 'auto' || (!hasExplicitPreference && variant !== 'happy')) {
+    attachAutoListener();
+  }
 }
 
 function attachAutoListener(): void {

