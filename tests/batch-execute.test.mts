@@ -1,13 +1,14 @@
+import { issueSubRequestAdmission } from '../server/_shared/sub-request-admission.ts';
 /**
  * Unit + gateway tests for the generic REST batch endpoint
  * (POST /api/batch/v1/execute, server/worldmonitor/batch/v1/execute-batch.ts).
  *
  * The handler re-dispatches each operation as a same-origin GET through the
- * public gateway, so the security posture rests on four invariants pinned
+ * public gateway, so the security posture rests on five invariants pinned
  * here:
  *   1. only same-origin, documented-RPC-shaped paths are fetched (SSRF guard);
- *   2. only credential/negotiation headers cross into sub-requests — cookies
- *      and gateway trust markers (x-user-id) never do;
+ *   2. credentials and negotiation headers cross with an opaque admission;
+ *      cookies and trusted principal stamps do not;
  *   3. a batch can never recurse (marker header + /api/batch/* path both
  *      refuse);
  *   4. the endpoint itself is NOT public — anonymous callers get 401 from the
@@ -15,7 +16,9 @@
  *   5. every sub-operation is charged to the BATCH CALLER's own rate-limit
  *      bucket before dispatch. The sub-request's own gateway pass keys its
  *      limits to the platform's fetch egress IP, so without this pre-charge a
- *      batch is a per-IP quota bypass.
+ *      batch is a per-IP quota bypass. The inner gateway pass skips its own
+ *      limiter for marked sub-requests (the pre-charge is the admission), so
+ *      admitted operations are charged exactly once — never egress-keyed.
  */
 
 import assert from 'node:assert/strict';
@@ -31,6 +34,7 @@ import type { FetchLike } from '../server/worldmonitor/batch/v1/execute-batch.ts
 import {
   __resetRateLimitForTest,
   hasEndpointRatePolicy,
+  SUB_REQUEST_MARKER_HEADER,
   TRUSTED_RATE_LIMIT_PRINCIPAL_HEADER,
 } from '../server/_shared/rate-limit.ts';
 import { installRedis } from './helpers/fake-upstash-redis.mts';
@@ -139,9 +143,12 @@ describe('executeBatch handler', () => {
     assert.equal(sent.get(BATCH_MARKER_HEADER), '1');
     assert.equal(sent.get('accept'), 'application/json');
     assert.equal(sent.get('user-agent'), 'my-agent/2.0');
-    // Cookies and gateway trust markers must never cross into sub-requests.
+    // Cookies and the legacy user-id trust marker must never cross into
+    // sub-requests.
     assert.equal(sent.get('cookie'), null);
     assert.equal(sent.get('x-user-id'), null);
+    // A fresh request-bound admission crosses instead of a trusted principal.
+    assert.match(sent.get(SUB_REQUEST_MARKER_HEADER) ?? '', /^[0-9a-f-]{36}$/);
   });
 
   it('sends a descriptive default User-Agent when the caller omits one (CF WAF rejects generic UAs)', async () => {
@@ -313,9 +320,10 @@ describe('executeBatch handler', () => {
 
     assert.equal(res.results[0]!.status, 503);
     assert.deepEqual(res.results[0]!.body, { error: 'Rate-limit service temporarily unavailable' });
-    // The global fallback stays availability-first, exactly as at the gateway.
-    assert.equal(res.results[1]!.status, 200);
-    assert.deepEqual(calls.map((call) => call.url), [`${ORIGIN}${unguardedPath}`]);
+    // No admission proof can be issued during a Redis outage. Do not dispatch
+    // under an egress identity, even for an otherwise fail-open read.
+    assert.equal(res.results[1]!.status, 503);
+    assert.equal(calls.length, 0);
   });
 
   it('returns the 429 a direct call would have received, without dispatching', async () => {
@@ -380,9 +388,10 @@ describe('executeBatch handler', () => {
       assert.match(key, /:apikey-user:user_stamped(:|$)/, `expected the stamped principal, got ${key}`);
       assert.ok(!key.includes(CALLER_IP), 'a stamped principal must not fall back to IP');
     }
-    // The trust marker is gateway-internal and must never cross into a sub-request.
+    // Principal stamps stay local; the inner gateway verifies the admission.
     const sent = new Headers(calls[0]!.init.headers as HeadersInit);
     assert.equal(sent.get(TRUSTED_RATE_LIMIT_PRINCIPAL_HEADER), null);
+    assert.match(sent.get(SUB_REQUEST_MARKER_HEADER) ?? '', /^[0-9a-f-]{36}$/);
   });
 
   it('falls back to the caller IP when the stamped principal is absent or malformed', async () => {
@@ -438,7 +447,44 @@ describe('batch gateway access', () => {
     Object.assign(process.env, originalEnv);
   });
 
-  it('strips a client-supplied rate-limit principal before the fan-out charges it', async () => {
+  it('refuses a forged sub-request marker on the outer caller request', async () => {
+    // The sub-request marker is gateway-internal and travels only on
+    // re-dispatched sub-requests (which skip the inner limiter because the
+    // outer pre-charge was the admission). The outer caller request must
+    // never carry it: a client that forges it would otherwise claim
+    // server-initiated status. The batch recursion guard refuses it with
+    // the same 400 as a nested batch, before any fan-out runs.
+    const [{ createDomainGateway, serverOptions }, generated, { batchHandler }] = await Promise.all([
+      import('../server/gateway.ts'),
+      import('../src/generated/server/worldmonitor/batch/v1/service_server.ts'),
+      import('../server/worldmonitor/batch/v1/handler.ts'),
+    ]);
+    delete process.env.WORLDMONITOR_VALID_KEYS;
+    process.env.WM_SESSION_SECRET = 'synthetic-batch-marker-secret-at-least-32-bytes';
+    installRedis({});
+    __resetRateLimitForTest();
+    const { issueSessionToken } = await import('../api/_session.js');
+
+    const token = (await issueSessionToken()).token;
+    const gateway = createDomainGateway(generated.createBatchServiceRoutes(batchHandler, serverOptions));
+    const res = await gateway(
+      new Request(`${ORIGIN}/api/batch/v1/execute`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Origin: ORIGIN,
+          'X-WorldMonitor-Key': token,
+          'x-real-ip': CALLER_IP,
+          [SUB_REQUEST_MARKER_HEADER]: '1',
+        },
+        body: JSON.stringify({ operations: [{ id: 'a', path: '/api/market/v1/list-market-quotes' }] }),
+      }),
+    );
+
+    assert.equal(res.status, 400);
+  });
+
+  it('strips a client-supplied principal stamp before the fan-out charges it', async () => {
     // The stamp is gateway-internal. If an inbound copy survived to the
     // handler, any caller could name the bucket their batch is charged to.
     const [{ createDomainGateway, serverOptions }, generated, { batchHandler }] = await Promise.all([
@@ -489,6 +535,131 @@ describe('batch gateway access', () => {
     for (const key of subOpKeys) {
       assert.ok(key.includes(`:ip:${CALLER_IP}`), `expected the caller's IP bucket, got ${key}`);
     }
+  });
+
+  it('skips prepaid limits only with a valid single-use admission', async () => {
+    const [{ createDomainGateway }] = await Promise.all([
+      import('../server/gateway.ts'),
+    ]);
+    const stubRoutes = [
+      {
+        method: 'GET',
+        path: '/api/intelligence/v1/list-material-events',
+        handler: async () => new Response(JSON.stringify({ events: [] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      },
+    ];
+    // Sanity: the stub really is a no-policy global-fallback path, so the
+    // probe exercises the gateway limiter and nothing else.
+    assert.equal(hasEndpointRatePolicy('/api/intelligence/v1/list-material-events'), false);
+
+    async function gatewayLimiterAdmissions(mode: 'plain' | 'forged' | 'valid' | 'replay'): Promise<{ status: number; admissions: number }> {
+      const redis = installRedis({});
+      __resetRateLimitForTest();
+      // A session token satisfies the non-public auth gate on the stub; the
+      // limiter assertions below are independent of which bucket it selects.
+      process.env.WM_SESSION_SECRET = 'synthetic-inner-skip-secret-at-least-32-bytes';
+      const { issueSessionToken } = await import('../api/_session.js');
+      const token = (await issueSessionToken()).token;
+      const keys: string[] = [];
+      const base = redis.fetchImpl;
+      globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const body = typeof init?.body === 'string' ? init.body : '';
+        for (const match of body.matchAll(/"(rl:[^"]+)"/g)) keys.push(match[1]!);
+        return base(input, init);
+      }) as typeof fetch;
+      const gateway = createDomainGateway(stubRoutes);
+      const headers: Record<string, string> = {
+        Origin: ORIGIN,
+        'X-WorldMonitor-Key': token,
+        'x-real-ip': '66.249.1.1',
+        [TRUSTED_RATE_LIMIT_PRINCIPAL_HEADER]: 'api_key:user_stamped',
+      };
+      const url = `${ORIGIN}/api/intelligence/v1/list-material-events`;
+      if (mode === 'forged') headers[SUB_REQUEST_MARKER_HEADER] = '1';
+      if (mode === 'valid' || mode === 'replay') {
+        const admission = await issueSubRequestAdmission(new Request(url, { headers }));
+        assert.ok(admission);
+        headers[SUB_REQUEST_MARKER_HEADER] = admission;
+      }
+      if (mode === 'replay') {
+        await (await gateway(new Request(url, { headers }))).text();
+        keys.length = 0;
+      }
+      const res = await gateway(new Request(url, { headers }));
+      // Drain the body so the gateway's cache-header path settles before the
+      // next installRedis replaces globalThis.fetch.
+      await res.text();
+      return { status: res.status, admissions: keys.length };
+    }
+
+    const control = await gatewayLimiterAdmissions('plain');
+    assert.equal(control.status, 200);
+    assert.ok(control.admissions > 0, 'control: an unmarked request must be charged by the gateway');
+
+    const marked = await gatewayLimiterAdmissions('valid');
+    assert.equal(marked.status, 200);
+    assert.equal(marked.admissions, 0, 'a marked sub-request must not consume a second (egress-keyed) admission');
+    for (const mode of ['forged', 'replay'] as const) {
+      const rejected = await gatewayLimiterAdmissions(mode);
+      assert.equal(rejected.status, 200);
+      assert.ok(rejected.admissions > 0, `${mode} proof must not waive limits`);
+    }
+  });
+
+  it('charges one endpoint admission and one account meter per real batch operation', async () => {
+    const [{ createDomainGateway, serverOptions }, generated] = await Promise.all([
+      import('../server/gateway.ts'),
+      import('../src/generated/server/worldmonitor/batch/v1/service_server.ts'),
+    ]);
+    process.env.API_RATE_LIMIT_ENFORCE = 'true';
+    process.env.CONVEX_SITE_URL = 'https://batch-test.convex.site';
+    process.env.CONVEX_SERVER_SHARED_SECRET = 'batch-test-secret';
+    process.env.WORLDMONITOR_VALID_KEYS = 'operator-key';
+    const redis = installRedis({});
+    __resetRateLimitForTest();
+    const key = `wm_${'d'.repeat(40)}`;
+    const userId = 'user_batch_meter_review';
+    const path = '/api/market/v1/list-market-quotes';
+    const keys: string[] = [];
+    let daily = 0;
+    let handlers = 0;
+    const inner = createDomainGateway([{
+      method: 'GET', path,
+      handler: async () => { handlers += 1; return Response.json({ quotes: [] }); },
+    }]);
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('/api/internal-validate-api-key')) return Response.json({ userId });
+      if (url.includes('/api/internal-entitlements')) return Response.json({
+        planKey: 'api_starter', validUntil: Date.now() + 86_400_000,
+        features: { tier: 2, apiAccess: true, apiRateLimit: 60, apiDailyAllowance: 2 },
+      });
+      if (url.startsWith(`${ORIGIN}${path}`)) return inner(new Request(url, init));
+      const body = typeof init?.body === 'string' ? init.body : '';
+      for (const match of body.matchAll(/"(rl:[^"]+)"/g)) keys.push(match[1]!);
+      const commands = body ? JSON.parse(body) : [];
+      if (Array.isArray(commands[0])) {
+        daily += commands.filter((cmd: unknown[]) => cmd[0] === 'INCR' && String(cmd[1]).includes('rl:apikey:day:')).length;
+      }
+      return redis.fetchImpl(input, init);
+    }) as typeof fetch;
+    const executeBatch = createExecuteBatch();
+    const outer = createDomainGateway(generated.createBatchServiceRoutes({ executeBatch }, serverOptions));
+    const response = await outer(new Request(`${ORIGIN}/api/batch/v1/execute`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-WorldMonitor-Key': key, 'x-real-ip': CALLER_IP },
+      body: JSON.stringify({ operations: [{ id: 'a', path }, { id: 'b', path }] }),
+    }));
+    assert.equal(response.status, 200, await response.clone().text());
+    const result = await response.json();
+    assert.deepEqual(result.results.map((op: { status: number }) => op.status).sort(), [200, 429]);
+    assert.equal(handlers, 1, 'outer account admission leaves room for only one operation');
+    assert.equal(daily, 3, 'outer call and both attempted operations use the daily meter');
+    const endpointKeys = keys.filter(k => k.includes(`rl:ep:${path}:apikey-user:${userId}:`));
+    // Upstash touches two sliding windows per admission.
+    assert.equal(endpointKeys.length, 4, 'two operations must have only two endpoint admissions');
   });
 
   it('is NOT public and not premium: anonymous POST gets 401 before any fan-out', async () => {

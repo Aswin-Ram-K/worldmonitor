@@ -1,3 +1,4 @@
+import { consumeSubRequestAdmission } from './_shared/sub-request-admission';
 import { hasCurrentEntitlementCoverage } from './_shared/entitlement-coverage';
 /**
  * Shared gateway logic for per-domain Vercel edge functions.
@@ -770,10 +771,10 @@ function attachRequiredBboxDiagnosticHeaders(
 // entry (see stripClientTrustedHeaders); the authenticated user id is re-
 // injected after Clerk / wm_ user-key / legacy bearer auth via
 // withAuthenticatedUserId, and the rate-limit principal is stamped once all
-// auth has resolved (see withTrustedRateLimitPrincipal). The internal-MCP
-// block below has its own strip-and-rebuild step that ALSO strips these
-// headers alongside INTERNAL_MCP_VERIFIED_HEADER — both layers are
-// defense-in-depth.
+// auth has resolved (see withTrustedRateLimitPrincipal).
+//
+// The sub-request header remains untrusted until its one-use Redis admission
+// is consumed. Presence alone never bypasses a gateway limit.
 function cloneRequestWithHeaders(request: Request, headers: Headers): Request {
   return new Request(request, { headers });
 }
@@ -1153,13 +1154,15 @@ export function createDomainGateway(
     // Defense-in-depth: strip client-controlled copies of the trusted
     // internal-MCP markers BEFORE any other logic runs. The gateway is the
     // ONLY layer permitted to set `x-wm-mcp-internal-verified` /
-    // `x-user-id` (the latter is also set by verified session / user-key
-    // paths below). Without the strip step, an attacker
-    // who sends `x-wm-mcp-internal-verified: 1` from outside could spoof
-    // premium context to any handler that reads these markers via
-    // `isCallerPremium`. The strip MUST run regardless of whether the
-    // X-WM-MCP-Internal header is present, so that the legacy
-    // `validateApiKey` path also receives a sanitised request.
+    // `x-user-id` / the rate-limit principal stamp. Without the strip step,
+    // an attacker who sends `x-wm-mcp-internal-verified: 1` from outside
+    // could spoof premium context to any handler that reads these markers
+    // via `isCallerPremium`, and a forged principal stamp would let any
+    // caller name the bucket their fan-out is charged to. The strip MUST run
+    // regardless of whether the X-WM-MCP-Internal header is present, so that
+    // the legacy `validateApiKey` path also receives a sanitised request.
+    //
+    // Sub-request admission is verified separately before rate limiting.
     //
     // Mutation invariant: every subsequent request reconstruction in this
     // function must build from the (already-stripped) `request`, not from
@@ -1391,6 +1394,14 @@ export function createDomainGateway(
       trusted.delete(INTERNAL_MCP_NONCE_HEADER);
       trusted.set(INTERNAL_MCP_VERIFIED_HEADER, getInternalMcpVerifiedNonce());
       trusted.set(TRUSTED_USER_ID_HEADER, verified.userId);
+      // The verified MCP caller is a confirmed paid principal: stamp the
+      // rate-limit principal here too, so a downstream fan-out (e.g. a batch
+      // issued through the MCP tool path) charges the verified userId bucket
+      // instead of silently downgrading to the caller's IP.
+      trusted.set(
+        TRUSTED_RATE_LIMIT_PRINCIPAL_HEADER,
+        formatTrustedRateLimitPrincipal(verified.userId, 'session'),
+      );
       const rebuildInit: RequestInit = { method: request.method, headers: trusted };
       if (bodyBytes !== null) rebuildInit.body = bodyBytes;
       request = new Request(request.url, rebuildInit);
@@ -2054,8 +2065,13 @@ export function createDomainGateway(
     // Gateway rate limiting — two-phase: endpoint-specific first, then global fallback.
     // Confirmed paid principals use per-user buckets; other traffic uses IP.
     //
+    // Only a single-use admission for this exact request waives the prepaid
+    // endpoint/global limit. Account meters and auth still run for every call.
+    const isServerSubRequest = await consumeSubRequestAdmission(request, rateLimitPrincipalUserId
+      ? formatTrustedRateLimitPrincipal(rateLimitPrincipalUserId, isUserApiKey ? 'api_key' : 'session')
+      : null);
     // Google searches need their tighter upstream budget even after MCP admission.
-    if (internalMcpVerified && (pathname === '/api/aviation/v1/search-google-flights'
+    if (!isServerSubRequest && internalMcpVerified && (pathname === '/api/aviation/v1/search-google-flights'
       || pathname === '/api/aviation/v1/search-google-dates')) {
       const endpointRlResponse = await checkEndpointRateLimit(request, pathname, corsHeaders, {
         principalUserId: request.headers.get(TRUSTED_USER_ID_HEADER)!,
@@ -2072,6 +2088,7 @@ export function createDomainGateway(
     // already enforced 50/day + 60/min per userId in api/mcp.ts. A second
     // limiter here would create misleading double-counting and could 429
     // legitimate Pro tool fetches that pass the upstream cap.
+    //
     if (!internalMcpVerified) {
       // These local provider lookups use the sidecar cache without Upstash.
       // Keep these exceptions exact-path; cloud requests retain the provider cap.
@@ -2080,7 +2097,7 @@ export function createDomainGateway(
           || pathname === '/api/military/v1/get-wingbits-live-flight'
           || pathname === '/api/imagery/v1/search-imagery'
           || pathname === '/api/webcam/v1/get-webcam-image');
-      const endpointRlResponse = isSidecarProviderLookup ? null : rateLimitPrincipalUserId
+      const endpointRlResponse = isServerSubRequest || isSidecarProviderLookup ? null : rateLimitPrincipalUserId
         ? await checkEndpointRateLimit(request, pathname, corsHeaders, {
             principalUserId: rateLimitPrincipalUserId,
             principalScope: isUserApiKey ? 'api_key' : 'session',
@@ -2232,7 +2249,7 @@ export function createDomainGateway(
         }
       }
 
-      if (!governedByApiKeyLayer && !hasEndpointRatePolicy(pathname)) {
+      if (!isServerSubRequest && !governedByApiKeyLayer && !hasEndpointRatePolicy(pathname)) {
         // WORLDMONITOR-12A: scope the bucket to the credential, not just the
         // user. An API key and a browser session resolve to the same Clerk id,
         // so without this a customer's own scraper drains the 600/min budget
