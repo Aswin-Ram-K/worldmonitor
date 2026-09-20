@@ -58,6 +58,11 @@ describe('notification link suppression matcher (#8401)', () => {
     assert.equal(isLinkSuppressed('https://evil.example.eviler.example/', p), false);
   });
 
+  it('host entry matches non-default ports (relay and SW agree)', () => {
+    const p = parsed(`${HOST_ENTRY_PREFIX}evil.example`);
+    assert.equal(isLinkSuppressed('https://evil.example:8443/x', p), true);
+  });
+
   it('non-http(s) candidates never match, even with a hostile entry present', () => {
     const p = parsed('javascript:alert(1)', 'data:text/html,<h1>x</h1>', EVIL);
     assert.equal(isLinkSuppressed('javascript:alert(1)', p), false);

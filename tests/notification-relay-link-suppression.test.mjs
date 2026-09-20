@@ -194,4 +194,17 @@ describe('notification-relay link suppression (#8401)', () => {
       h.restore();
     }
   });
+
+  it('negative-caches the unreadable set within the TTL window (no hot loop)', async () => {
+    const h = installHarness({ smembersOk: false });
+    try {
+      await relay.processEvent(makeEvent());
+      await relay.processEvent(makeEvent());
+      assert.equal(h.calls.smembers, 1, 'second event inside the TTL must reuse the negative cache');
+      const unreadableLogs = h.logs.filter((l) => l.includes('[relay][link-suppressed-unreadable]'));
+      assert.equal(unreadableLogs.length, 1, 'unreadable control must log once per TTL window, not per event');
+    } finally {
+      h.restore();
+    }
+  });
 });

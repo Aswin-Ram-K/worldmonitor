@@ -53,7 +53,7 @@
     } catch (_e2) {
       // Malformed % sequences stay encoded — still comparable.
     }
-    return { href: protocol + '//' + host + path + parsed.search + parsed.hash, host: host };
+    return { href: protocol + '//' + host + path + parsed.search + parsed.hash, host: parsed.hostname.toLowerCase().replace(/\.+$/, '') };
   }
 
   function isSuppressed(candidate, snapshot, origin) {

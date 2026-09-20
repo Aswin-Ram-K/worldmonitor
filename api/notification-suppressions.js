@@ -116,7 +116,11 @@ export default async function handler(req) {
   if (!creds) {
     return jsonResponse({ suppressed: [], hosts: [], updatedAt: null, unavailable: true }, 200, {
       ...cors,
-      'Cache-Control': 'public, s-maxage=60, stale-while-revalidate=30',
+      // Never cache the fail-open shape: during a Redis blip the first miss
+      // would otherwise poison the CDN and keep answering unavailable:true
+      // (navigate) after Redis recovers — delaying the revoke exactly when
+      // it matters.
+      'Cache-Control': 'no-store',
     });
   }
 
@@ -124,7 +128,7 @@ export default async function handler(req) {
   if (!snapshot.readable) {
     return jsonResponse({ suppressed: [], hosts: [], updatedAt: null, unavailable: true }, 200, {
       ...cors,
-      'Cache-Control': 'public, s-maxage=60, stale-while-revalidate=30',
+      'Cache-Control': 'no-store',
     });
   }
   const { suppressed, hosts } = splitEntries(snapshot.entries);

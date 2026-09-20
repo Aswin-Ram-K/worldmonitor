@@ -63,6 +63,18 @@ self.addEventListener('notificationclick', (event) => {
   const target = (event.notification.data && event.notification.data.url) || '/';
   const tag = (event.notification.data && event.notification.data.tag)
     || (typeof event.notification.tag === 'string' ? event.notification.tag : '');
+  // The blocked notice itself carries tag 'suppressed:*': bypass the check
+  // so its click can never re-enter the suppression path.
+  if (typeof tag === 'string' && tag.startsWith('suppressed:')) {
+    event.waitUntil((async () => {
+      try {
+        if (clients.openWindow) await clients.openWindow('/');
+      } catch {
+        // Swallow — nothing to do beyond failing silently.
+      }
+    })());
+    return;
+  }
   event.waitUntil((async () => {
     // Operator revoke path (#8401): an already-delivered push payload
     // carries its URL on-device. When the operator blocks that URL after

@@ -63,11 +63,18 @@ describe('notification-suppressions edge endpoint (#8401)', () => {
 
   it('fails open with unavailable:true when Redis cannot be read', async () => {
     globalThis.fetch = async () => ({ ok: false, status: 500 });
-    const { readSuppressionSnapshot } = await import('../api/notification-suppressions.js?edge-unavail');
+    const { readSuppressionSnapshot, default: handler } = await import('../api/notification-suppressions.js?edge-unavail');
     // Snapshot helper reports unreadable; the handler maps it to the
-    // fail-open shape (tested through the same module, fresh query key).
+    // fail-open shape with no-store (never CDN-cache the fail-open).
     const snap = await readSuppressionSnapshot();
     assert.equal(snap.readable, false);
+    const res = await handler(new Request('https://worldmonitor.app/api/notification-suppressions'));
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.deepEqual(body.suppressed, []);
+    assert.deepEqual(body.hosts, []);
+    assert.equal(body.unavailable, true);
+    assert.match(res.headers.get('Cache-Control') ?? '', /no-store/);
   });
 
   it('rejects non-GET methods', async () => {
@@ -155,6 +162,12 @@ describe('link-suppression-check.js matcher (#8401)', () => {
     assert.equal(await check.checkLinkSuppressed('https://not-evil.example/'), false);
   });
 
+  it('host entries match non-default ports (parity with the relay matcher)', async () => {
+    const box = makeSwSandbox({ snapshot: { suppressed: [], hosts: ['evil.example'] } });
+    const check = box.self.wmLinkSuppression;
+    assert.equal(await check.checkLinkSuppressed('https://evil.example:8443/x'), true);
+  });
+
   it('unavailable snapshot fails open to navigation', async () => {
     const box = makeSwSandbox({ snapshot: { suppressed: [], hosts: [], unavailable: true } });
     const check = box.self.wmLinkSuppression;
@@ -163,6 +176,21 @@ describe('link-suppression-check.js matcher (#8401)', () => {
 });
 
 describe('push-handler.js notificationclick suppression (#8401)', () => {
+  it('loads link-suppression-check.js before push-handler.js (order is load-bearing)', async () => {
+    const { readFileSync: read } = await import('node:fs');
+    const { fileURLToPath: toPath } = await import('node:url');
+    const { dirname: dir, resolve: join } = await import('node:path');
+    const root = join(dir(toPath(import.meta.url)), '..');
+    const vite = read(join(root, 'vite.config.ts'), 'utf-8');
+    const match = vite.match(/importScripts:\s*\[([^\]]*)\]/);
+    assert.ok(match, 'vite.config.ts must declare workbox importScripts');
+    const list = match[1] ?? '';
+    const suppIdx = list.indexOf('/link-suppression-check.js');
+    const pushIdx = list.indexOf('/push-handler.js');
+    assert.ok(suppIdx !== -1, 'importScripts must include /link-suppression-check.js');
+    assert.ok(pushIdx !== -1, 'importScripts must include /push-handler.js');
+    assert.ok(suppIdx < pushIdx, 'link-suppression-check.js must load BEFORE push-handler.js so notificationclick can consult it');
+  });
   it('blocked click shows the blocked notice and never touches clients', async () => {
     const box = makeSwSandbox({ snapshot: { suppressed: [EVIL], hosts: [] } });
     const ev = notifClickEvent({ url: EVIL });
@@ -188,5 +216,18 @@ describe('push-handler.js notificationclick suppression (#8401)', () => {
     box.emit('notificationclick', ev);
     for (const p of ev.waits) await p;
     assert.equal(box.opened, EVIL, 'endpoint outage must not strand the click');
+  });
+
+  it('suppressed-notice clicks bypass the check (no re-entry loop)', async () => {
+    const box = makeSwSandbox({ snapshot: { suppressed: [EVIL], hosts: [] } });
+    const waits = [];
+    const ev = {
+      notification: { data: { url: '/', tag: 'suppressed:rss:1' }, tag: 'suppressed:rss:1', close() {} },
+      waitUntil(p) { waits.push(Promise.resolve(p)); },
+    };
+    box.emit('notificationclick', ev);
+    for (const p of waits) await p;
+    assert.equal(box.opened, '/', 'notice click must open the dashboard without re-checking');
+    assert.equal(box.shown.length, 0, 'notice click must not show another notice');
   });
 });

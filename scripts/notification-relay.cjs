@@ -133,16 +133,24 @@ async function readBlockedLinkSet(fetchImpl = fetch) {
 
 async function getBlockedLinkSet(fetchImpl = fetch) {
   const nowMs = Date.now();
-  if (blockedLinksCache.entries && (nowMs - blockedLinksCache.fetchedAtMs) < BLOCKED_LINKS_UNREADABLE_TTL_MS) {
+  // Both positive snapshots AND negative (unreadable) outcomes are cached
+  // for the TTL window: entries!=null means we have a snapshot (possibly
+  // stale-but-usable), and fetchedAtMs!=0 means we attempted recently.
+  // Without the second condition a sustained outage would fire an SMEMBERS +
+  // warn per event under an event storm.
+  if ((blockedLinksCache.entries || blockedLinksCache.fetchedAtMs) && (nowMs - blockedLinksCache.fetchedAtMs) < BLOCKED_LINKS_UNREADABLE_TTL_MS) {
     return blockedLinksCache;
   }
   const read = await readBlockedLinkSet(fetchImpl);
   if (!read.readable) {
     // Fail OPEN but not silent: keep the last known-good snapshot when we
     // have one (an incident block survives a transient Redis blip), and
-    // tell the operator the control is currently unreadable.
+    // tell the operator the control is currently unreadable. Stamp the
+    // attempt time so a sustained outage logs once per TTL window instead
+    // of firing an SMEMBERS + warn per event under an event storm.
+    blockedLinksCache = { ...blockedLinksCache, fetchedAtMs: nowMs, readable: false };
     console.warn('[relay][link-suppressed-unreadable] blocked-link set unreadable; continuing with last-known snapshot');
-    return { ...blockedLinksCache, readable: false };
+    return blockedLinksCache;
   }
   blockedLinksCache = { entries: read.entries, fetchedAtMs: nowMs, readable: true };
   return blockedLinksCache;
@@ -1284,7 +1292,8 @@ async function processEvent(event) {
       const suppressed = links.filter((l) => isLinkSuppressed(l, parsed));
       if (suppressed.length > 0) {
         const safeLinks = suppressed.map((l) => String(l).replace(/[\r\n]/g, ' ').slice(0, 200));
-        console.log(`[relay][link-suppressed] eventType=${event.eventType} rules=${matching.length} links=${safeLinks.join(',')}`);
+        const safeType = String(event.eventType ?? 'unknown').replace(/[\r\n]/g, ' ').slice(0, 80);
+        console.log(`[relay][link-suppressed] eventType=${safeType} rules=${matching.length} links=${safeLinks.join(',')}`);
         await logLinkSuppression(event, matching.length).catch(() => {});
         return;
       }
