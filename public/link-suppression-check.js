@@ -27,6 +27,7 @@
   var CACHE_NAME = 'wm-link-suppressions-v1';
   var CACHE_TTL_MS = 60 * 1000;
   var FETCH_TIMEOUT_MS = 3_000;
+  var URL_DIGEST_PREFIX = 'sha256:';
   var FALLBACK_BODY = 'This link was blocked by WorldMonitor after delivery. Open the dashboard for the latest safe update.';
 
   function normalizeUrl(raw, origin) {
@@ -56,23 +57,47 @@
     return { href: protocol + '//' + host + path + parsed.search + parsed.hash, host: parsed.hostname.toLowerCase().replace(/\.+$/, '') };
   }
 
+  function digestUrl(url) {
+    try {
+      if (!self.crypto || !self.crypto.subtle) return Promise.resolve(null);
+      var bytes = new TextEncoder().encode(url);
+      return self.crypto.subtle.digest('SHA-256', bytes).then(function (digest) {
+        return URL_DIGEST_PREFIX + Array.from(new Uint8Array(digest), function (byte) {
+          return byte.toString(16).padStart(2, '0');
+        }).join('');
+      }).catch(function () { return null; });
+    } catch (_e) {
+      return Promise.resolve(null);
+    }
+  }
+
   function isSuppressed(candidate, snapshot, origin) {
-    if (!snapshot || snapshot.unavailable) return false;
+    if (!snapshot || snapshot.unavailable) return Promise.resolve(false);
     var norm = normalizeUrl(candidate, origin);
-    if (!norm) return false;
+    if (!norm) return Promise.resolve(false);
     var urls = Array.isArray(snapshot.suppressed) ? snapshot.suppressed : [];
     var hosts = Array.isArray(snapshot.hosts) ? snapshot.hosts : [];
+    var digests = [];
     for (var i = 0; i < urls.length; i++) {
       if (typeof urls[i] !== 'string') continue;
+      if (urls[i].slice(0, URL_DIGEST_PREFIX.length) === URL_DIGEST_PREFIX) {
+        digests.push(urls[i]);
+        continue;
+      }
+      // Accept raw entries from a snapshot cached by the previous service
+      // worker version, but the endpoint no longer publishes them.
       var entry = normalizeUrl(urls[i], origin);
-      if (entry && entry.href === norm.href) return true;
+      if (entry && entry.href === norm.href) return Promise.resolve(true);
     }
     for (var j = 0; j < hosts.length; j++) {
       var host = typeof hosts[j] === 'string' ? hosts[j].trim().toLowerCase().replace(/\.+$/, '') : '';
       if (!host) continue;
-      if (norm.host === host || norm.host.slice(-host.length - 1) === '.' + host) return true;
+      if (norm.host === host || norm.host.slice(-host.length - 1) === '.' + host) return Promise.resolve(true);
     }
-    return false;
+    if (digests.length === 0) return Promise.resolve(false);
+    return digestUrl(norm.href).then(function (digest) {
+      return digest !== null && digests.indexOf(digest) !== -1;
+    });
   }
 
   function readCachedSnapshot() {

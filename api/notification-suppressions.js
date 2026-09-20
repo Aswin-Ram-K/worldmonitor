@@ -7,9 +7,9 @@
  * delivered push payload stops navigating once its URL is blocked. It is
  * intentionally anonymous and uncached-per-user: the payload is an operator
  * incident control, not user data, and the SW has no auth context at click
- * time. Entries are stored normalized (see
- * scripts/shared/notification-link-suppression.cjs) so the set is safe to
- * expose verbatim — it contains only blocked URLs/hosts, no user state.
+ * time. Exact URLs are returned as SHA-256 digests because incident entries
+ * can contain query or fragment secrets. Host rules remain normalized plain
+ * hostnames so the service worker can match subdomains.
  *
  * Fail-open with `unavailable: true` when Redis cannot be read: the SW
  * treats that as "no information" and still navigates, rather than
@@ -27,6 +27,12 @@ import { getRedisCredentials } from './_upstash-json.js';
 
 const SUPPRESSIONS_KEY = 'notif:blocked-links:v1';
 const HOST_PREFIX = 'host:';
+const URL_DIGEST_PREFIX = 'sha256:';
+
+function warnUnavailable(reason, context = '') {
+  const suffix = context ? ` ${context}` : '';
+  console.warn(`[notification-suppressions][unavailable] reason=${reason}${suffix}`);
+}
 
 function normalizeUrl(raw) {
   if (typeof raw !== 'string') return null;
@@ -64,10 +70,16 @@ function normalizeHost(raw) {
   return host;
 }
 
-function splitEntries(entries) {
-  const suppressed = [];
+async function digestUrl(url) {
+  const bytes = new TextEncoder().encode(url);
+  const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes);
+  return `${URL_DIGEST_PREFIX}${Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')}`;
+}
+
+async function splitEntries(entries) {
+  const exactUrls = [];
   const hosts = [];
-  if (!Array.isArray(entries)) return { suppressed, hosts };
+  if (!Array.isArray(entries)) return { suppressed: [], hosts };
   for (const entry of entries) {
     if (typeof entry !== 'string') continue;
     const trimmed = entry.trim();
@@ -78,27 +90,46 @@ function splitEntries(entries) {
       continue;
     }
     const url = normalizeUrl(trimmed);
-    if (url && !suppressed.includes(url)) suppressed.push(url);
+    if (url && !exactUrls.includes(url)) exactUrls.push(url);
   }
-  return { suppressed, hosts };
+  return { suppressed: await Promise.all(exactUrls.map(digestUrl)), hosts };
 }
 
 export async function readSuppressionSnapshot(fetchImpl = (...args) => globalThis.fetch(...args)) {
   const url = process.env.UPSTASH_REDIS_REST_URL;
   const token = process.env.UPSTASH_REDIS_REST_TOKEN;
-  if (!url || !token) return { readable: false, entries: null };
+  if (!url || !token) {
+    warnUnavailable('missing-credentials', 'source=upstash-smembers');
+    return { readable: false, entries: null };
+  }
   try {
     const res = await fetchImpl(`${url}/SMEMBERS/${encodeURIComponent(SUPPRESSIONS_KEY)}`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'User-Agent': 'worldmonitor-edge/1.0' },
       signal: AbortSignal.timeout(5000),
     });
-    if (!res.ok) return { readable: false, entries: null };
-    const json = await res.json().catch(() => null);
+    if (!res.ok) {
+      warnUnavailable('redis-http-error', `source=upstash-smembers status=${res.status}`);
+      return { readable: false, entries: null };
+    }
+    let json;
+    try {
+      json = await res.json();
+    } catch {
+      warnUnavailable('malformed-json', 'source=upstash-smembers');
+      return { readable: false, entries: null };
+    }
     const entries = json && Object.prototype.hasOwnProperty.call(json, 'result') ? json.result : undefined;
-    if (!Array.isArray(entries)) return { readable: false, entries: null };
+    if (!Array.isArray(entries)) {
+      warnUnavailable('invalid-result', 'source=upstash-smembers');
+      return { readable: false, entries: null };
+    }
     return { readable: true, entries };
-  } catch {
+  } catch (error) {
+    const errorName = error instanceof Error && error.name
+      ? error.name.replace(/[^A-Za-z0-9_.-]/g, '').slice(0, 64)
+      : 'UnknownError';
+    warnUnavailable('redis-request-error', `source=upstash-smembers error=${errorName || 'UnknownError'}`);
     return { readable: false, entries: null };
   }
 }
@@ -114,6 +145,7 @@ export default async function handler(req) {
 
   const creds = getRedisCredentials();
   if (!creds) {
+    warnUnavailable('missing-credentials', 'source=handler');
     return jsonResponse({ suppressed: [], hosts: [], updatedAt: null, unavailable: true }, 200, {
       ...cors,
       // Never cache the fail-open shape: during a Redis blip the first miss
@@ -131,7 +163,20 @@ export default async function handler(req) {
       'Cache-Control': 'no-store',
     });
   }
-  const { suppressed, hosts } = splitEntries(snapshot.entries);
+  let split;
+  try {
+    split = await splitEntries(snapshot.entries);
+  } catch (error) {
+    const errorName = error instanceof Error && error.name
+      ? error.name.replace(/[^A-Za-z0-9_.-]/g, '').slice(0, 64)
+      : 'UnknownError';
+    warnUnavailable('url-digest-error', `source=handler error=${errorName || 'UnknownError'}`);
+    return jsonResponse({ suppressed: [], hosts: [], updatedAt: null, unavailable: true }, 200, {
+      ...cors,
+      'Cache-Control': 'no-store',
+    });
+  }
+  const { suppressed, hosts } = split;
   return jsonResponse({ suppressed, hosts, updatedAt: new Date().toISOString() }, 200, {
     ...cors,
     // 60s shared cache: fast enough for incident response (the SW also
