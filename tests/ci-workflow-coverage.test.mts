@@ -227,7 +227,12 @@ function workflowJobBlock(workflow: string, job: string): string {
 // empty. A group that interpolates only that field collapses to a shared prefix
 // (`proto-freshness-`), and cancel-in-progress: true then evicts sibling
 // mainline runs that still owe the deploy gate a verdict (#8445).
-const NON_PR_CONCURRENCY_FALLBACK = /\|\|\s*github\.(?:sha|run_id)\b/;
+// The empty-on-non-PR operand must sit immediately before the unique fallback:
+// `github.ref || github.sha` still matches a bare `|| github.sha` and still
+// collapses every push to main onto one group.
+const NON_PR_CONCURRENCY_FALLBACK =
+  /github\.event\.pull_request\.number\s*\|\|\s*github\.(?:sha|run_id)\b/;
+const PR_ONLY_CANCEL_IN_PROGRESS = "${{ github.event_name == 'pull_request' }}";
 
 function workflowLevelConcurrency(source: string): {
   group?: unknown;
@@ -241,7 +246,12 @@ function workflowLevelConcurrency(source: string): {
 function cancelsUnconditionallyWithoutNonPrFallback(source: string): boolean {
   const concurrency = workflowLevelConcurrency(source);
   if (!concurrency) return false;
-  if (concurrency['cancel-in-progress'] !== true) return false;
+  const cancel = concurrency['cancel-in-progress'];
+  // Boolean true always evicts. Any other expression does too, unless it is
+  // exactly the #8443 PR-only form. `${{ true }}` used to skip this helper.
+  const isUnconditionalCancel =
+    cancel === true || (typeof cancel === 'string' && cancel !== PR_ONLY_CANCEL_IN_PROGRESS);
+  if (!isUnconditionalCancel) return false;
   return typeof concurrency.group !== 'string' || !NON_PR_CONCURRENCY_FALLBACK.test(concurrency.group);
 }
 
@@ -1979,7 +1989,7 @@ describe('gated workflows evict superseded PR runs (#8443)', () => {
       );
       assert.equal(
         workflow.concurrency['cancel-in-progress'],
-        "${{ github.event_name == 'pull_request' }}",
+        PR_ONLY_CANCEL_IN_PROGRESS,
         `${file} must cancel only pull_request runs — a superseded main push still owes the deploy gate a verdict`,
       );
     });
@@ -2026,8 +2036,10 @@ describe('gated workflows evict superseded PR runs (#8443)', () => {
 
   // cancel === true used to pass the test above even when the group had no
   // fallback, so proto-check.yml's mainline collapse was invisible. Parse the
-  // group: a non-PR fallback is github.sha or github.run_id, the two unique
-  // identities the repo already uses for this (#8444, stacked-merge-guard.yml).
+  // group: github.event.pull_request.number must sit immediately before
+  // github.sha or github.run_id, the two unique identities the repo already
+  // uses for this (#8444, stacked-merge-guard.yml). A string cancel other than
+  // the #8443 PR-only form is also unconditional.
   it('requires a non-PR fallback when a gated workflow cancels unconditionally (#8445)', () => {
     const gateWorkflows = (YAML.parse(deployGateWorkflow) as {
       on: { workflow_run: { workflows: string[] } };
@@ -2088,6 +2100,50 @@ describe('gated workflows evict superseded PR runs (#8443)', () => {
       cancelsUnconditionallyWithoutNonPrFallback(runIdProto),
       false,
       'a run_id fallback must also satisfy the tightened guard',
+    );
+
+    for (const collapsingOperand of [
+      'github.ref',
+      'github.event_name',
+      'github.repository',
+      'github.workflow',
+    ] as const) {
+      const collapsingProto = protoCheckWorkflow.replace(
+        /group:\s*[^\n]+/,
+        `group: proto-freshness-\${{ ${collapsingOperand} || github.sha }}`,
+      );
+      assert.notEqual(
+        collapsingProto,
+        protoCheckWorkflow,
+        `${collapsingOperand} mutation must change the live source`,
+      );
+      assert.equal(
+        cancelsUnconditionallyWithoutNonPrFallback(collapsingProto),
+        true,
+        `the guard must reject ${collapsingOperand} || github.sha — that operand is never empty on push`,
+      );
+    }
+
+    const expressionCancelCollapsed = protoCheckWorkflow
+      .replace(
+        /group:\s*[^\n]+/,
+        'group: proto-freshness-${{ github.event.pull_request.number }}',
+      )
+      .replace(/cancel-in-progress:\s*[^\n]+/, 'cancel-in-progress: ${{ true }}');
+    assert.notEqual(
+      expressionCancelCollapsed,
+      protoCheckWorkflow,
+      'the expression-cancel mutation must change the live source',
+    );
+    assert.match(
+      expressionCancelCollapsed,
+      /cancel-in-progress:\s*\$\{\{ true \}\}/,
+      'the expression-cancel mutation must apply',
+    );
+    assert.equal(
+      cancelsUnconditionallyWithoutNonPrFallback(expressionCancelCollapsed),
+      true,
+      'PR-number-only plus ${{ true }} must still fail the helper — expression cancel is unconditional unless it is the PR-only form',
     );
   });
 });
