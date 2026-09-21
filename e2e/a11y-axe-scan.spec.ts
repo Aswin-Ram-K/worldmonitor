@@ -1,7 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
-
-import { NO_GPU_LAUNCH } from './helpers/no-gpu-launch';
 import {
   compareAxeViolationBaseline,
   type KnownAxeViolationBaseline,
@@ -23,8 +21,6 @@ import {
  * CI invokes this file via `npm run test:e2e:ci-smoke` (nothing in CI runs
  * the `e2e/` glob). `REQUIRED_CI_SMOKE_SPECS` pins the argv token.
  */
-
-test.use(NO_GPU_LAUNCH);
 
 async function loadDashboard(page: Page): Promise<void> {
   await page.goto('/', { waitUntil: 'domcontentloaded' });

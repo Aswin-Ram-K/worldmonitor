@@ -20,10 +20,6 @@ import {
   waitForLoadAllDataFanOut as waitForLoadAllDataFanOutMarks,
 } from './helpers/load-all-data-fan-out';
 
-import { NO_GPU_LAUNCH } from './helpers/no-gpu-launch';
-
-test.use(NO_GPU_LAUNCH);
-
 // ---------------------------------------------------------------------------
 // #7045 U5 — prove the transfer work removed requests rather than data.
 //
