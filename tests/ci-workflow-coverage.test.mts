@@ -1980,10 +1980,22 @@ describe('gated workflows evict superseded PR runs (#8443)', () => {
       if (name) byName.set(name, source);
     }
 
+    // Text-matching `cancel-in-progress:` would accept a literal `false`, and
+    // a job-level group evicts only its own job while the rest of the
+    // superseded run keeps burning. A gated workflow has several jobs feeding
+    // the gate by definition, so only a workflow-level group with cancellation
+    // actually enabled retires the whole run.
     const uncancelled = gateWorkflows.filter((name) => {
       const source = byName.get(name);
       assert.ok(source, `deploy-gate.yml triggers on "${name}", which no workflow file defines`);
-      return !/^\s*cancel-in-progress:/m.test(source);
+      const concurrency = (YAML.parse(source) as { concurrency?: unknown }).concurrency;
+      if (typeof concurrency !== 'object' || concurrency === null) return true;
+      const { group, 'cancel-in-progress': cancel } = concurrency as {
+        group?: unknown;
+        'cancel-in-progress'?: unknown;
+      };
+      if (typeof group !== 'string' || group.length === 0) return true;
+      return !(cancel === true || (typeof cancel === 'string' && cancel.includes('${{')));
     });
 
     assert.deepEqual(
