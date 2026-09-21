@@ -8,6 +8,13 @@ on:
     - cron: '30 4 * * *'
   workflow_dispatch:
 
+# See test.yml. The nightly audit and any manual dispatch land in a group of
+# one via `github.run_id`, so a PR push can never evict a running scan
+# (#8443).
+concurrency:
+  group: security-audit-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 

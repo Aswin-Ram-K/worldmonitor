@@ -5,6 +5,16 @@ on:
   push:
     branches: [main]
 
+# A superseded PR run owes nobody a verdict. Branch protection and
+# deploy-gate.sh both evaluate the head SHA only. Letting it finish burned
+# 59% of this workflow's runs on dead commits and queued the live commit
+# behind them. Cancellation is pull_request-only. A push to main still owes
+# the deploy gate a verdict, and `github.run_id` gives it a group of one so
+# nothing can evict it (#8443).
+concurrency:
+  group: test-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 
