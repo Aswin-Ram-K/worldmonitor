@@ -897,8 +897,6 @@ describe('validateNoHallucinatedStatusQualifiers — Sep 20 "former President Tr
     ({ validateNoHallucinatedStatusQualifiers: validate } = await import('../shared/brief-llm-core.js'));
   });
 
-  // Captured fixtures: the 2026-09-20 08:00 brief. The source headline names
-  // Trump with no title; the article body says "U.S. President Trump".
   const SEP_20_HEADLINE = 'Trump Returns to UN as Iran War Spreads Across Shipping Chokepoints';
   const SEP_20_CARD =
     'Former President Trump returned to the UN General Assembly amidst escalating maritime tensions as Iranian-linked attacks on shipping chokepoints intensified globally.';
@@ -957,6 +955,17 @@ describe('validateNoHallucinatedStatusQualifiers — Sep 20 "former President Tr
     assert.equal(validate('The former Soviet republic of Georgia held elections.', 'Georgia holds elections').ok, true);
     assert.equal(validate('Former officials said the deal was near.', 'Deal nears, officials say').ok, true);
     assert.equal(validate('The two leaders met late Tuesday, President Trump said.', 'Trump comments on the meeting').ok, true);
+  });
+
+  it('a lowercase word after the title is not the name; the engine backtracks to the capitalized one', () => {
+    const r = validate('Former official adviser John Smith warned of escalation.', 'Smith warns of escalation');
+    assert.equal(r.ok, false);
+    assert.match(r.hallucinated[0], /John$/);
+  });
+
+  it('a hyphenated "then-" in the source grounds "then-President"; the bare adverb does not', () => {
+    assert.equal(validate('The senator, then-President Obama, backed it.', 'then-President Obama backs it').ok, true);
+    assert.equal(validate('The senator, then-President Obama, backed it.', 'and then President Obama backed it').ok, false);
   });
 
   it('adverb "then" without a hyphen is not a qualifier', () => {

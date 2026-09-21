@@ -2011,7 +2011,6 @@ describe('generateWhyMatters — v11 endpoint-cache cross-read (#4914)', () => {
 });
 
 describe('status-qualifier gate on the email brief (Sep 20 "former President Trump")', () => {
-  // Captured 2026-09-20 08:00 brief. Every string below shipped to a reader.
   const pool = [
     { hash: 'a1b2c3d4e5f6a1b2', headline: 'Iran war live: Tehran sets terms for peace; Saudi forces foil Riyadh attack', threatLevel: 'critical', category: 'Conflict', country: 'Iran', source: 'Al Jazeera' },
     { hash: 'b2c3d4e5f6a1b2c3', headline: 'Trump Returns to UN as Iran War Spreads Across Shipping Chokepoints', threatLevel: 'critical', category: 'Geopolitics', country: 'United States', source: 'gCaptain' },
@@ -2041,8 +2040,15 @@ describe('status-qualifier gate on the email brief (Sep 20 "former President Tru
   });
 
   it('validateDigestProseShape rejects when the surviving lead no longer grounds against the pool', () => {
-    const lead = 'Good morning. Former President Trump returns to the UN as the Iran conflict intensifies across shipping chokepoints.';
+    const lead = 'Good morning to every reader of this edition, wherever you are today. Former President Trump returns to the UN as the Iran conflict intensifies across shipping chokepoints.';
     assert.equal(validateDigestProseShape({ lead, threads: [conflictThread] }, pool), null);
+  });
+
+  it('validateDigestProseShape repairs the dotted "former U.S. President" variant instead of rejecting it', () => {
+    const lead = 'Good morning. Iran has declared its terms for peace after an attempted attack on Riyadh that Saudi forces claim to have foiled. This comes as former U.S. President Trump prepares to address the UN.';
+    const out = validateDigestProseShape({ lead, threads: [conflictThread] }, pool);
+    assert.ok(out);
+    assert.equal(out.lead, 'Good morning. Iran has declared its terms for peace after an attempted attack on Riyadh that Saudi forces claim to have foiled.');
   });
 
   it('validateDigestProseShape drops the captured teaser and keeps the digest', () => {
