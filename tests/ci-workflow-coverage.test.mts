@@ -223,6 +223,28 @@ function workflowJobBlock(workflow: string, job: string): string {
   return match[0];
 }
 
+// On push, schedule, and workflow_dispatch, github.event.pull_request.number is
+// empty. A group that interpolates only that field collapses to a shared prefix
+// (`proto-freshness-`), and cancel-in-progress: true then evicts sibling
+// mainline runs that still owe the deploy gate a verdict (#8445).
+const NON_PR_CONCURRENCY_FALLBACK = /\|\|\s*github\.(?:sha|run_id)\b/;
+
+function workflowLevelConcurrency(source: string): {
+  group?: unknown;
+  'cancel-in-progress'?: unknown;
+} | null {
+  const concurrency = (YAML.parse(source) as { concurrency?: unknown }).concurrency;
+  if (typeof concurrency !== 'object' || concurrency === null) return null;
+  return concurrency as { group?: unknown; 'cancel-in-progress'?: unknown };
+}
+
+function cancelsUnconditionallyWithoutNonPrFallback(source: string): boolean {
+  const concurrency = workflowLevelConcurrency(source);
+  if (!concurrency) return false;
+  if (concurrency['cancel-in-progress'] !== true) return false;
+  return typeof concurrency.group !== 'string' || !NON_PR_CONCURRENCY_FALLBACK.test(concurrency.group);
+}
+
 function workflowStepBlock(workflow: string, stepName: string): string {
   const marker = `\n      - name: ${stepName}\n`;
   const startIndex = workflow.indexOf(marker);
@@ -1988,12 +2010,9 @@ describe('gated workflows evict superseded PR runs (#8443)', () => {
     const uncancelled = gateWorkflows.filter((name) => {
       const source = byName.get(name);
       assert.ok(source, `deploy-gate.yml triggers on "${name}", which no workflow file defines`);
-      const concurrency = (YAML.parse(source) as { concurrency?: unknown }).concurrency;
-      if (typeof concurrency !== 'object' || concurrency === null) return true;
-      const { group, 'cancel-in-progress': cancel } = concurrency as {
-        group?: unknown;
-        'cancel-in-progress'?: unknown;
-      };
+      const concurrency = workflowLevelConcurrency(source);
+      if (!concurrency) return true;
+      const { group, 'cancel-in-progress': cancel } = concurrency;
       if (typeof group !== 'string' || group.length === 0) return true;
       return !(cancel === true || (typeof cancel === 'string' && cancel.includes('${{')));
     });
@@ -2002,6 +2021,73 @@ describe('gated workflows evict superseded PR runs (#8443)', () => {
       uncancelled,
       [],
       `every workflow feeding the deploy gate must evict superseded runs: ${uncancelled.join(', ')}`,
+    );
+  });
+
+  // cancel === true used to pass the test above even when the group had no
+  // fallback, so proto-check.yml's mainline collapse was invisible. Parse the
+  // group: a non-PR fallback is github.sha or github.run_id, the two unique
+  // identities the repo already uses for this (#8444, stacked-merge-guard.yml).
+  it('requires a non-PR fallback when a gated workflow cancels unconditionally (#8445)', () => {
+    const gateWorkflows = (YAML.parse(deployGateWorkflow) as {
+      on: { workflow_run: { workflows: string[] } };
+    }).on.workflow_run.workflows;
+
+    const byName = new Map<string, string>();
+    for (const entry of readdirSync(workflowsDir)) {
+      if (!entry.endsWith('.yml')) continue;
+      const source = read(resolve(workflowsDir, entry));
+      const name = (YAML.parse(source) as { name?: string }).name;
+      if (name) byName.set(name, source);
+    }
+
+    const collapsed = gateWorkflows.filter((name) => {
+      const source = byName.get(name);
+      assert.ok(source, `deploy-gate.yml triggers on "${name}", which no workflow file defines`);
+      return cancelsUnconditionallyWithoutNonPrFallback(source);
+    });
+    assert.deepEqual(
+      collapsed,
+      [],
+      `unconditional cancel on a gated workflow must keep a unique group off pull_request: ${collapsed.join(', ')}`,
+    );
+  });
+
+  it('fails proto-check.yml when its concurrency group is mutated back to PR-number-only (#8445)', () => {
+    const collapsedProto = protoCheckWorkflow.replace(
+      /group:\s*[^\n]+/,
+      'group: proto-freshness-${{ github.event.pull_request.number }}',
+    );
+    assert.notEqual(collapsedProto, protoCheckWorkflow, 'the collapsed-group mutation must change the live source');
+    assert.match(
+      collapsedProto,
+      /group:\s*proto-freshness-\$\{\{ github\.event\.pull_request\.number \}\}/,
+      'the collapsed-group mutation must apply',
+    );
+    assert.equal(
+      cancelsUnconditionallyWithoutNonPrFallback(collapsedProto),
+      true,
+      'the tightened guard must fail proto-check.yml when the group interpolates only the PR number',
+    );
+
+    const uniqueProto = protoCheckWorkflow.replace(
+      /group:\s*[^\n]+/,
+      'group: proto-freshness-${{ github.event.pull_request.number || github.sha }}',
+    );
+    assert.equal(
+      cancelsUnconditionallyWithoutNonPrFallback(uniqueProto),
+      false,
+      'a SHA fallback must satisfy the tightened guard',
+    );
+
+    const runIdProto = protoCheckWorkflow.replace(
+      /group:\s*[^\n]+/,
+      'group: proto-freshness-${{ github.event.pull_request.number || github.run_id }}',
+    );
+    assert.equal(
+      cancelsUnconditionallyWithoutNonPrFallback(runIdProto),
+      false,
+      'a run_id fallback must also satisfy the tightened guard',
     );
   });
 });
