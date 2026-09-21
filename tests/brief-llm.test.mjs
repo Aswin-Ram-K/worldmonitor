@@ -2184,6 +2184,32 @@ describe('stitching-phrase gate on the email brief (Sep 20 "This development com
     assert.equal(validateDigestProseShape({ lead, threads: [conflictThread] }, pool), null);
   });
 
+  it('keeps the prior sentence when a stitch is glued after U.N. or U.S.', () => {
+    // LEAD_SENTENCE_SPLIT does not break after a dotted initialism, so the
+    // stitch would otherwise sit in the same entry as the true first sentence
+    // and take the whole lead with it.
+    const cases = ['U.N.', 'U.S.'];
+    for (const initialism of cases) {
+      const lead =
+        `Iran has declared its terms for peace after Saudi forces foiled a Riyadh attack, speaking at the ${initialism} This development comes as former President Trump returns to the UN amid shipping attacks.`;
+      const out = validateDigestProseShape({ lead, threads: [conflictThread] }, pool);
+      assert.ok(out, initialism);
+      assert.equal(
+        out.lead,
+        `Iran has declared its terms for peace after Saudi forces foiled a Riyadh attack, speaking at the ${initialism}`,
+        initialism,
+      );
+    }
+  });
+
+  it('does not split "U.S. Navy" just because the next word is capitalized', () => {
+    const lead =
+      'Iran has declared its terms for peace after the U.S. Navy foiled an attack on Riyadh that Saudi forces also reported.';
+    const out = validateDigestProseShape({ lead, threads: [conflictThread] }, pool);
+    assert.ok(out);
+    assert.equal(out.lead, lead);
+  });
+
   it('does not treat "becomes as" as the "comes as" stem', () => {
     const lead = 'Iran has declared its terms for peace after Saudi forces foiled an attack on Riyadh, and the ceasefire proposal becomes as important as the military picture for Gulf shipping.';
     const out = validateDigestProseShape({ lead, threads: [conflictThread] }, pool);

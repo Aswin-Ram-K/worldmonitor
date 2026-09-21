@@ -736,6 +736,26 @@ const LEAD_SENTENCE_SPLIT = /(?<=(?<!\b\p{Lu})[.!?])\s+/u;
 // did not catch them. Word-bounded so "becomes as" is not a hit.
 const LEAD_STITCHING_STEM_RE = /\b(?:comes as|occurs as|meanwhile|at the same time|in other news|elsewhere|on another front|in a separate development)\b/i;
 
+// LEAD_SENTENCE_SPLIT leaves "U.S. Navy" intact by not breaking after a
+// single capital + period. The same lookbehind glues a following stitch
+// sentence onto "... at the U.N. This development comes as ...". Split
+// that case only here, and only when the next words are a stitch opener,
+// so status-qualifier repair keeps the shared splitter.
+const STITCH_AFTER_INITIALISM_SPLIT =
+  /(?<=\b(?:\p{Lu}\.)+)\s+(?=(?:This|Meanwhile|Elsewhere|At the same time|In other news|On another front|In a separate development)\b)/iu;
+
+/**
+ * @param {string} lead
+ * @returns {string[]}
+ */
+function splitLeadSentencesForStitching(lead) {
+  const parts = [];
+  for (const coarse of lead.split(LEAD_SENTENCE_SPLIT)) {
+    parts.push(...coarse.split(STITCH_AFTER_INITIALISM_SPLIT));
+  }
+  return parts;
+}
+
 /**
  * @param {string} lead
  * @returns {{ lead: string; dropped: string[] }}
@@ -744,7 +764,7 @@ function repairLeadStitchingPhrases(lead) {
   if (!LEAD_STITCHING_STEM_RE.test(lead)) return { lead, dropped: [] };
   const dropped = [];
   const kept = [];
-  for (const sentence of lead.split(LEAD_SENTENCE_SPLIT)) {
+  for (const sentence of splitLeadSentencesForStitching(lead)) {
     if (LEAD_STITCHING_STEM_RE.test(sentence)) dropped.push(sentence);
     else kept.push(sentence);
   }
