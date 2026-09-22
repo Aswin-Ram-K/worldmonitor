@@ -240,6 +240,14 @@ describe('relay -> service worker contract', () => {
     }
   });
 
+  it('the shared absolute dashboard fallback still leaves the relay relative', () => {
+    // formatEventLinkForPush falls back to the shared NOTIFY_DASHBOARD_URL,
+    // an absolute apex URL; sendWebPush must strip its origin like any other.
+    const { NOTIFY_DASHBOARD_URL } = require('../scripts/shared/notify-fields.cjs');
+    assert.match(NOTIFY_DASHBOARD_URL, /^https:\/\//);
+    assert.equal(safePushClickUrl(NOTIFY_DASHBOARD_URL, 'user_abc'), '/');
+  });
+
   it('a relay-emitted article link still gets its own tab', async () => {
     const relayOutput = safePushClickUrl('https://reuters.com/world/story', 'user_abc');
     const box = makeSwSandbox();
@@ -343,9 +351,12 @@ describe('push path carries no origin literal', () => {
     // proved nothing about region coverage. This form fails whenever a region
     // is missing or too narrow, which is the property being claimed.
     const src = relaySource();
+    // The per-event call site's own `eventUrl` line is gone: main's
+    // formatEventLinkForPush (#8414) now builds that URL, and its absolute
+    // NOTIFY_DASHBOARD_URL fallback is relativized by safePushClickUrl inside
+    // sendWebPush — pinned by the contract test above.
     const removalSites = [
       'url: PUSH_DASHBOARD_PATH,',
-      "const eventUrl = event.payload?.link || event.payload?.url || PUSH_DASHBOARD_PATH;",
     ];
     for (const site of removalSites) {
       assert.ok(src.includes(site), `removal site must still exist in source: ${site}`);
