@@ -16,7 +16,7 @@ import { getCorsHeaders, getOriginDeniedCorsHeaders, isDisallowedOrigin, isAllow
 import { isPublicSharedRpcRequest } from '../src/shared/public-rpc-cache';
 import { PRO_FRESH_CACHE_RPC_PATHS } from '../src/shared/pro-fresh-rpc';
 // @ts-expect-error — JS module, no declaration file
-import { USER_API_KEY_GATEWAY_VALIDATION_ERROR, validateApiKey } from '../api/_api-key.js';
+import { USER_API_KEY_GATEWAY_VALIDATION_ERROR, getHeaderApiKey, validateApiKey } from '../api/_api-key.js';
 // @ts-expect-error — JS module, no declaration file
 import { timingSafeEqualSecret } from '../api/_crypto.js';
 // @ts-expect-error — JS module, no declaration file
@@ -361,6 +361,11 @@ const RPC_CACHE_TIER: Record<string, CacheTier> = {
   '/api/economic/v1/get-crude-inventories': 'daily',
   '/api/economic/v1/get-nat-gas-storage': 'daily',
   '/api/economic/v1/get-eu-yield-curve': 'daily',
+  // Daily macro seed. A miss returns unavailable:true, which the gateway
+  // already keeps out of the shared cache.
+  '/api/economic/v1/get-us-cpi-monthly': 'daily',
+  '/api/economic/v1/get-us-treasury-par-yield-curve': 'daily',
+  '/api/economic/v1/get-us-interest-rates': 'daily',
   '/api/supply-chain/v1/get-critical-minerals': 'daily',
   '/api/supply-chain/v1/get-mineral-production': 'daily',
   '/api/military/v1/get-aircraft-details': 'static',
@@ -1529,10 +1534,7 @@ export function createDomainGateway(
     // wm_ key is still an explicit authenticating credential and its owner must
     // pass the #4611 apiAccess gate.
     let isUserApiKey = false;
-    const wmKey =
-      request.headers.get('X-WorldMonitor-Key') ??
-      request.headers.get('X-Api-Key') ??
-      '';
+    const wmKey = getHeaderApiKey(request);
     const dockerSelfHostSessionAuthorized =
       isDockerSelfHostCountryBrief &&
       keyCheck.valid &&

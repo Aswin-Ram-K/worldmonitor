@@ -1,3 +1,4 @@
+import { assertAccountWritable } from "./accountDeletion/guard";
 import { ConvexError, v } from "convex/values";
 import {
   internalMutation,
@@ -13,11 +14,13 @@ import {
   USER_PREFS_WRITE_RATE_LIMIT,
   USER_PREFS_WRITE_RATE_WINDOW_MS,
 } from "./constants";
-import { ROLLING_DEPLOYMENT_PREFERENCE_KEYS } from "../shared/cloud-preferences-contract";
+import { PREFERENCE_VARIANTS, ROLLING_DEPLOYMENT_PREFERENCE_KEYS } from "../shared/cloud-preferences-contract";
 import { normalizeWebcamPreferences } from "../shared/pinned-webcams";
 
+const preferenceVariant = v.union(...PREFERENCE_VARIANTS.map(variant => v.literal(variant)));
+
 export const getPreferencesByUserId = internalQuery({
-  args: { userId: v.string(), variant: v.string() },
+  args: { userId: v.string(), variant: preferenceVariant },
   handler: async (ctx, args) => {
     const prefs = await ctx.db
       .query("userPreferences")
@@ -30,7 +33,7 @@ export const getPreferencesByUserId = internalQuery({
 });
 
 export const getPreferences = query({
-  args: { variant: v.string() },
+  args: { variant: preferenceVariant },
   handler: async (ctx, args) => {
     const identity = await ctx.auth.getUserIdentity();
     if (!identity) return null;
@@ -227,7 +230,7 @@ export const pruneStaleWriteRateLimits = internalMutation({
 
 export const setPreferences = mutation({
   args: {
-    variant: v.string(),
+    variant: preferenceVariant,
     data: v.any(),
     expectedSyncVersion: v.number(),
     schemaVersion: v.optional(v.number()),
@@ -241,6 +244,7 @@ export const setPreferences = mutation({
     // string-data wire-strip bug.)
     if (!identity) throw new ConvexError({ kind: "UNAUTHENTICATED" });
     const userId = identity.subject;
+    await assertAccountWritable(ctx, userId);
 
     // Run before the CAS read so stale expectedSyncVersion requests cannot
     // bypass the authoritative direct-Convex backstop by intentionally

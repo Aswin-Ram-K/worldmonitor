@@ -1044,3 +1044,61 @@ describe('cloud prefs marker ordering (#7833 review)', () => {
     assert.equal(result.state, 'error');
   });
 });
+
+describe('settings import cloud transaction', () => {
+  for (const failure of ['remove', 'restore']) {
+    it(`attempts every rollback entry after a ${failure} failure`, async () => {
+      await runHarness(async (cloudPrefs, controls) => {
+        localStorage.setItem('worldmonitor-theme', 'dark');
+        localStorage.setItem('wm-font-scale', '1');
+        localStorage.setItem('wm-map-provider', 'auto');
+        cloudPrefs.install('full');
+        const dirtyBefore = localStorage.getItem('wm-cloud-prefs-dirty-keys');
+        const setItem = localStorage.setItem.bind(localStorage);
+        const removeItem = localStorage.removeItem.bind(localStorage);
+        localStorage.removeItem = (key) => {
+          if (failure === 'remove' && key === 'wm-font-scale') throw new Error('SecurityError');
+          removeItem(key);
+        };
+        localStorage.setItem = (key, value) => {
+          if (failure === 'restore' && key === 'wm-font-scale' && value === '1') throw new Error('QuotaExceededError');
+          setItem(key, value);
+        };
+        controls.rejectWritesTo('wm-stream-quality');
+
+        assert.throws(() => cloudPrefs.applyLocalPreferenceImport([
+          ['worldmonitor-theme', 'light'], ['wm-font-scale', '1.2'],
+          ['wm-map-provider', 'carto'], ['wm-stream-quality', 'high'],
+        ]), /Settings rollback failed/);
+
+        assert.equal(localStorage.getItem('worldmonitor-theme'), 'dark');
+        assert.equal(localStorage.getItem('wm-map-provider'), 'auto');
+        assert.equal(localStorage.getItem('wm-font-scale'), failure === 'remove' ? '1' : null);
+        assert.equal(localStorage.getItem('wm-cloud-prefs-dirty-keys'), dirtyBefore);
+      });
+    });
+  }
+
+  it('does not mark partial imports dirty when a later write fails', async () => {
+    await runHarness(async (cloudPrefs, controls) => {
+      cloudPrefs.install('full');
+      const before = localStorage.getItem('worldmonitor-theme');
+      const dirtyBefore = localStorage.getItem('wm-cloud-prefs-dirty-keys');
+      controls.rejectWritesTo('wm-font-scale');
+      assert.throws(() => cloudPrefs.applyLocalPreferenceImport([
+        ['worldmonitor-theme', 'light'], ['wm-font-scale', '1.2'],
+      ]));
+      assert.equal(localStorage.getItem('worldmonitor-theme'), before);
+      assert.equal(localStorage.getItem('wm-cloud-prefs-dirty-keys'), dirtyBefore);
+    });
+  });
+
+  it('publishes successful validated imports through the normal sync path', async () => {
+    const result = await runHarness(async (cloudPrefs) => {
+      cloudPrefs.install('full');
+      cloudPrefs.applyLocalPreferenceImport([['worldmonitor-theme', 'light']]);
+      await cloudPrefs.syncNow();
+    });
+    assert.equal(result.acceptedDataByToken['test-token']?.['worldmonitor-theme'], 'light');
+  });
+});

@@ -132,6 +132,26 @@ async function hasValidWorldMonitorKey(key: string): Promise<boolean> {
   return timingSafeIncludes(key, WORLDMONITOR_VALID_KEYS);
 }
 
+/**
+ * The enterprise credential that authenticates this request, or '' if none does.
+ *
+ * An explicit `X-WorldMonitor-Key` / `X-Api-Key` header never falls back to an
+ * ambient cookie. Without one, each protected cookie is validated on its own so
+ * a rotated Pro key cannot mask a still-valid Widget key.
+ */
+async function resolveEnterpriseKey(
+  explicitKey: string,
+  proCookie: string,
+  widgetCookie: string,
+): Promise<string> {
+  if (explicitKey) {
+    return (await hasValidWorldMonitorKey(explicitKey)) ? explicitKey : '';
+  }
+  if (await hasValidWorldMonitorKey(proCookie)) return proCookie;
+  if (await hasValidWorldMonitorKey(widgetCookie)) return widgetCookie;
+  return '';
+}
+
 function getCookie(req: Request, name: string): string {
   const raw = req.headers.get('Cookie') || req.headers.get('cookie') || '';
   if (!raw) return '';
@@ -281,14 +301,22 @@ async function proxyWidgetAgent(
   const explicitWorldMonitorKey = isSessionTokenShape(headerWorldMonitorKey)
     ? ''
     : headerWorldMonitorKey;
-  const worldMonitorKey =
-    explicitWorldMonitorKey ||
-    getCookie(req, 'wm-pro-key') ||
-    getCookie(req, 'wm-widget-key') ||
-    headerWorldMonitorKey;
-  if (await hasValidWorldMonitorKey(worldMonitorKey)) {
+  const proCookie = getCookie(req, '__Host-wm-pro-key');
+  const widgetCookie = getCookie(req, '__Host-wm-widget-key');
+  // Explicit enterprise credentials must not fall back to ambient cookies.
+  // Otherwise validate each cookie: a rotated Pro key must not mask Widget.
+  //
+  // Keep the credential that actually validated, not just a boolean: the spend
+  // bucket below is keyed on its digest, so hashing anything else would merge
+  // two distinct enterprise keys into one meter.
+  const enterpriseKey = await resolveEnterpriseKey(
+    explicitWorldMonitorKey,
+    proCookie,
+    widgetCookie,
+  );
+  if (enterpriseKey) {
     isPro = true;
-    spendId = `wm:${await spendToken(worldMonitorKey)}`;
+    spendId = `wm:${await spendToken(enterpriseKey)}`;
     quotaUserId = spendId;
     directLlmDailyLimit = DIRECT_LLM_UNVERIFIED_DAILY_QUOTA_LIMIT;
   } else {
@@ -377,8 +405,8 @@ async function proxyWidgetAgent(
         : DIRECT_LLM_UNVERIFIED_DAILY_QUOTA_LIMIT;
     } else {
       // Legacy tester key path (wm-widget-key / wm-pro-key)
-      const widgetKey = req.headers.get('X-Widget-Key') || getCookie(req, 'wm-widget-key');
-      const proKey = req.headers.get('X-Pro-Key') || getCookie(req, 'wm-pro-key');
+      const widgetKey = req.headers.get('X-Widget-Key') || (explicitWorldMonitorKey ? '' : widgetCookie);
+      const proKey = req.headers.get('X-Pro-Key') || (explicitWorldMonitorKey ? '' : proCookie);
       const hasWidgetKey = await timingSafeEqualSecret(widgetKey, WIDGET_AGENT_KEY);
       const hasProKey = await timingSafeEqualSecret(proKey, PRO_WIDGET_KEY);
       if (!hasWidgetKey && !hasProKey) {

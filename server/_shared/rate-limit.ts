@@ -1,7 +1,7 @@
 import { SUB_REQUEST_MARKER_HEADER } from './sub-request-admission';
 import { Ratelimit, type Duration } from '@upstash/ratelimit';
 import { Redis } from '@upstash/redis';
-import { getClientIp, UNKNOWN_CLIENT_IP } from './client-ip';
+import { getClientIp, hasUnprovenCloudflareClientIp, UNKNOWN_CLIENT_IP } from './client-ip';
 // @ts-expect-error — JS module, no declaration file
 import { captureSilentError } from '../../api/_sentry-edge.js';
 // @ts-expect-error — JS module, no declaration file
@@ -13,7 +13,7 @@ import { durationToSeconds, limitWithFallback, resetRateLimitFallbackForTest } f
 // the helpers' original home and existing callers import them from this
 // module (getClientIp: api/ask.ts, api/a2a.ts, api/mcp-proxy.ts;
 // UNKNOWN_CLIENT_IP: turnstile.ts; plus the rate-limit test suites).
-export { getClientIp, hasCloudflareTransitProof, UNKNOWN_CLIENT_IP } from './client-ip';
+export { getClientIp, hasCloudflareTransitProof, hasUnprovenCloudflareClientIp, UNKNOWN_CLIENT_IP } from './client-ip';
 
 // @upstash/redis defaults to 5 retries with exponential backoff (~4.3s total)
 // before surfacing an unreachable-Redis error. The node test runner sets
@@ -171,6 +171,29 @@ function logScopedRateLimitMissingConfig(scope: string): void {
   reportRateLimitDegraded(stage, new Error('UPSTASH_REDIS_REST_URL or UPSTASH_REDIS_REST_TOKEN missing'));
 }
 
+// One-per-isolate latch for edge-proof rejections. Spoofed cf-connecting-ip
+// headers are caller-controlled on a direct origin hit; reporting every 403
+// would create an amplification path (mirrors api/mcp/auth.ts). (#8402)
+const EDGE_PROOF_RATE_LIMIT_LATCH = Symbol.for('worldmonitor.rate-limit.edge-proof-reported.v1');
+
+function reportEdgeProofRequiredOnce(stage: string, err: Error): void {
+  const existing = Reflect.get(globalThis, EDGE_PROOF_RATE_LIMIT_LATCH) as
+    | { reported: boolean }
+    | undefined;
+  const latch = existing ?? { reported: false };
+  if (!existing) Reflect.set(globalThis, EDGE_PROOF_RATE_LIMIT_LATCH, latch);
+  if (latch.reported) return;
+  latch.reported = true;
+  reportRateLimitDegraded(stage, err);
+}
+
+export function resetEdgeProofRateLimitReportedForTest(): void {
+  const latch = Reflect.get(globalThis, EDGE_PROOF_RATE_LIMIT_LATCH) as
+    | { reported: boolean }
+    | undefined;
+  if (latch) latch.reported = false;
+}
+
 // Marker header set on every degraded (fail-closed) response so observability
 // can correlate "rate-limit unavailable" windows with downstream behaviour
 // without parsing the JSON body. Mirrored in api/_rate-limit.js.
@@ -219,6 +242,31 @@ function rateLimitDegradedResponse(corsHeaders: Record<string, string>): Respons
       ...corsHeaders,
     },
   });
+}
+
+// 403 for IP-scoped budgets when cf-connecting-ip arrives without a valid
+// x-wm-edge-proof. Distinct from the Redis-degraded 503: the limiter is fine,
+// the Cloudflare transit proof is not. (#8402)
+function edgeProofRequiredResponse(corsHeaders: Record<string, string>): Response {
+  return new Response(JSON.stringify({ error: 'Cloudflare edge proof required' }), {
+    status: 403,
+    headers: {
+      'Content-Type': 'application/json',
+      'X-RateLimit-Mode': 'edge-proof',
+      'Cache-Control': 'no-store',
+      ...corsHeaders,
+    },
+  });
+}
+
+/** Reject unproven Cloudflare IPs before an IP-scoped budget or Redis fallback. */
+export function checkIpScopedEdgeProof(request: Request, corsHeaders: Record<string, string>): Response | null {
+  if (!hasUnprovenCloudflareClientIp(request)) return null;
+  reportEdgeProofRequiredOnce(
+    'ip-scoped:edge-proof',
+    new Error('Cloudflare client IP arrived without a valid x-wm-edge-proof'),
+  );
+  return edgeProofRequiredResponse(corsHeaders);
 }
 
 export interface RateLimitOptions {
@@ -504,6 +552,8 @@ function getPrincipalRateLimitIdentifier(
 }
 
 export async function checkRateLimit(request: Request, corsHeaders: Record<string, string>, opts: RateLimitOptions = {}): Promise<Response | null> {
+  const proofDenied = !opts.principalUserId && checkIpScopedEdgeProof(request, corsHeaders);
+  if (proofDenied) return proofDenied;
   const rl = getRatelimit();
   if (!rl) {
     if (opts.failClosed) {
@@ -1084,6 +1134,16 @@ export async function checkEndpointRateLimit(request: Request, pathname: string,
     return null;
   }
 
+  // IP-scoped endpoint budgets depend on a real client IP. A cf-connecting-ip
+  // without x-wm-edge-proof is either a direct-origin spoof or a Transform Rule
+  // miss — reject rather than share a Cloudflare PoP bucket (#8402). Principal-
+  // scoped budgets do not need the edge proof. Report the deploy drift once per
+  // isolate; logging every rejection would amplify under spoofed headers.
+  // Run before the Redis availability gate so a missing Upstash config cannot
+  // re-admit unproven CF client IPs under fail-open callers.
+  const proofDenied = !opts.principalUserId && checkIpScopedEdgeProof(request, corsHeaders);
+  if (proofDenied) return proofDenied;
+
   const rl = getEndpointRatelimit(pathname);
   if (!rl) {
     const failClosed = opts.failClosed ?? true;
@@ -1242,6 +1302,8 @@ export async function checkFailClosedScopedIpRateLimit(
   window: Duration,
   corsHeaders: Record<string, string>,
 ): Promise<Response | null> {
+  const proofDenied = checkIpScopedEdgeProof(request, corsHeaders);
+  if (proofDenied) return proofDenied;
   const result = await checkScopedRateLimit(scope, limit, window, getClientIp(request));
   if (result.degraded) return rateLimitDegradedResponse(corsHeaders);
   if (!result.allowed) {
