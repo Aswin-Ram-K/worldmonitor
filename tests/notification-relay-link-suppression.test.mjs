@@ -9,7 +9,11 @@
  *     log line + a ZADD record on the suppression log key (blast-radius log);
  *   - blocked host → same;
  *   - unblocked link → delivery proceeds;
- *   - unreadable set (Redis down) → fail-open delivery + loud unreadable log.
+ *   - unreadable set (Redis down) → fail-open delivery + loud unreadable log;
+ *   - scheme-relative / backslash spellings match host: like the classifier;
+ *   - a last-known snapshot is retained through a blip but dropped (with an
+ *     error log) past BLOCKED_LINKS_SNAPSHOT_MAX_AGE_MS;
+ *   - held quiet-hours events are re-checked when the batch drains.
  *
  * Run: node --test tests/notification-relay-link-suppression.test.mjs
  */
@@ -78,8 +82,10 @@ function makeEvent(link = EVIL) {
 
 let harnessSeq = 0;
 
-function installHarness({ smembers = [], smembersOk = true, pipelineOk = true, pipelineCommandError = false } = {}) {
-  const calls = { telegram: 0, pipeline: [], smembers: 0 };
+function installHarness({ smembers = [], smembersOk = true, pipelineOk = true, pipelineCommandError = false, held = null, rule = {} } = {}) {
+  const calls = { telegram: 0, telegramBodies: [], pipeline: [], smembers: 0, del: [] };
+  // Mutable so a test can flip Redis from healthy to down mid-scenario.
+  const state = { smembersOk };
   const logs = [];
   const origLog = console.log;
   const origWarn = console.warn;
@@ -102,7 +108,7 @@ function installHarness({ smembers = [], smembersOk = true, pipelineOk = true, p
       path = parsed.pathname;
     } catch { /* non-absolute URL: falls through to the Upstash default */ }
     if (path.includes('/relay/enabled-rules')) {
-      return { ok: true, json: async () => [{ userId: 'user-1', digestMode: 'realtime', eventTypes: [], sensitivity: 'all', countries: [], tickers: [], channels: ['telegram'], variant: 'full' }] };
+      return { ok: true, json: async () => [{ userId: 'user-1', digestMode: 'realtime', eventTypes: [], sensitivity: 'all', countries: [], tickers: [], channels: ['telegram'], variant: 'full', ...rule }] };
     }
     if (path.includes('/relay/entitlement')) {
       return { ok: true, json: async () => ({ tier: 1 }) };
@@ -112,11 +118,12 @@ function installHarness({ smembers = [], smembersOk = true, pipelineOk = true, p
     }
     if (host === 'api.telegram.org') {
       calls.telegram++;
+      calls.telegramBodies.push(String(opts.body ?? ''));
       return { status: 200, ok: true, json: async () => ({ ok: true }) };
     }
     if (u.endsWith(`/SMEMBERS/${encodeURIComponent(relay.BLOCKED_LINKS_KEY)}`)) {
       calls.smembers++;
-      if (!smembersOk) return { ok: false, status: 500 };
+      if (!state.smembersOk) return { ok: false, status: 500 };
       return { ok: true, json: async () => ({ result: smembers }) };
     }
     if (u.endsWith('/pipeline')) {
@@ -134,15 +141,24 @@ function installHarness({ smembers = [], smembersOk = true, pipelineOk = true, p
     // Upstash generic REST (GET/SET for entitlement cache, dedup SET NX).
     // Dedup MUST report "new" (Upstash "OK") — the relay's fail-open
     // fallback treats anything else as a duplicate on the second call.
+    if (held && path.startsWith('/LLEN/')) return { ok: true, json: async () => ({ result: held.length }) };
+    if (held && path.startsWith('/LRANGE/')) return { ok: true, json: async () => ({ result: held }) };
+    if (path.startsWith('/DEL/')) {
+      calls.del.push(decodeURIComponent(path.slice('/DEL/'.length)));
+      return { ok: true, json: async () => ({ result: 1 }) };
+    }
     if (u.includes('/SET/')) {
       return { ok: true, json: async () => ({ result: 'OK' }) };
     }
     return { ok: true, json: async () => ({ result: null }) };
   };
+  const origError = console.error;
+  console.error = (...args) => { logs.push(args.join(' ')); };
   return {
     calls,
     logs,
-    restore() { console.log = origLog; console.warn = origWarn; },
+    state,
+    restore() { console.log = origLog; console.warn = origWarn; console.error = origError; },
   };
 }
 
@@ -261,4 +277,76 @@ describe('notification-relay link suppression (#8401)', () => {
       h.restore();
     }
   });
+  it('drops scheme-relative and backslash spellings of a host-blocked link', async () => {
+    // classifyNotificationLink resolves both to https://evil.example/x and the
+    // text sinks deliver that, so the matcher must resolve them the same way.
+    for (const link of ['//evil.example/x', '/\\evil.example/x']) {
+      const h = installHarness({ smembers: ['host:evil.example'] });
+      try {
+        relay.__resetBlockedLinkCacheForTests();
+        await relay.processEvent(makeEvent(link));
+        assert.equal(h.calls.telegram, 0, `${link} must not reach Telegram`);
+        assert.ok(h.logs.some((l) => l.includes('[relay][link-suppressed]')), link);
+      } finally {
+        h.restore();
+      }
+    }
+  });
+
+  it('keeps a recent snapshot through an outage but stops trusting it past the max age', async () => {
+    const realNow = Date.now;
+    let now = realNow();
+    Date.now = () => now;
+    const h = installHarness({ smembers: [EVIL] });
+    try {
+      await relay.processEvent(makeEvent());
+      assert.equal(h.calls.telegram, 0, 'healthy read suppresses');
+
+      h.state.smembersOk = false;
+      now += 2 * 60 * 1000; // past the 60s re-read TTL, well within the max age
+      await relay.processEvent(makeEvent());
+      assert.equal(h.calls.telegram, 0, 'a recent last-known snapshot keeps the incident block during a blip');
+      assert.ok(h.logs.some((l) => l.includes('[relay][link-suppressed-unreadable]') && /age=\d+s/.test(l)),
+        'the unreadable warning must state how old the retained snapshot is');
+
+      now += relay.BLOCKED_LINKS_SNAPSHOT_MAX_AGE_MS;
+      await relay.processEvent(makeEvent());
+      assert.equal(h.calls.telegram, 1, 'past the max age the snapshot is dropped and delivery fails open');
+      assert.ok(h.logs.some((l) => l.includes('[relay][link-suppressed-stale]')),
+        'dropping an expired snapshot must be logged loudly');
+    } finally {
+      Date.now = realNow;
+      h.restore();
+    }
+  });
+
+  it('re-checks held quiet-hours events on drain and drops newly blocked ones', async () => {
+    const blocked = JSON.stringify({ eventType: 'rss_alert', severity: 'high', payload: { title: 'Held phishing lure', link: EVIL } });
+    const clean = JSON.stringify({ eventType: 'rss_alert', severity: 'high', payload: { title: 'Held clean story', link: 'https://reuters.com/x' } });
+    const h = installHarness({ smembers: [EVIL], held: [blocked, clean] });
+    try {
+      await relay.processEvent({ eventType: 'flush_quiet_held', userId: 'user-1', variant: 'full' });
+      assert.equal(h.calls.telegram, 1, 'the clean held event is still delivered');
+      const sent = h.calls.telegramBodies.join('\n');
+      assert.ok(sent.includes('Held clean story'));
+      assert.ok(!sent.includes('Held phishing lure'), 'a link blocked after hold must not ride the batch');
+      assert.ok(sent.includes('1 held alert'), 'the batch count excludes the suppressed event');
+      assert.ok(h.logs.some((l) => l.includes('[relay][link-suppressed]')), 'drain-time suppression is logged');
+    } finally {
+      h.restore();
+    }
+  });
+
+  it('discards a held queue whose every event is now blocked, without sending', async () => {
+    const blocked = JSON.stringify({ eventType: 'rss_alert', severity: 'high', payload: { title: 'Only lure', link: EVIL } });
+    const h = installHarness({ smembers: [EVIL], held: [blocked] });
+    try {
+      await relay.processEvent({ eventType: 'flush_quiet_held', userId: 'user-1', variant: 'full' });
+      assert.equal(h.calls.telegram, 0);
+      assert.deepEqual(h.calls.del, ['digest:quiet-held:user-1:full']);
+    } finally {
+      h.restore();
+    }
+  });
 });
+

@@ -28,6 +28,16 @@
 
 'use strict';
 
+// Resolve exactly as the delivery classifier does (classifyNotificationLink in
+// ./notify-fields.cjs): only a scheme-bearing or `/`-leading value is
+// resolvable, and it resolves against the dashboard base. Parsing base-less
+// made `//evil.example/x` and `/\\evil.example/x` unparseable here (so they
+// bypassed `host:evil.example`) while the classifier resolved them to
+// https://evil.example/x and every text sink delivered that.
+const { NOTIFY_DASHBOARD_URL } = require('./notify-fields.cjs');
+
+const RESOLVABLE_LINK_PATTERN = /^(?:[a-z][a-z0-9+.-]*:|\/)/i;
+
 const HOST_ENTRY_PREFIX = 'host:';
 
 /**
@@ -41,9 +51,10 @@ function normalizeSuppressedUrl(raw) {
   if (typeof raw !== 'string') return null;
   const trimmed = raw.trim();
   if (trimmed.length === 0) return null;
+  if (!RESOLVABLE_LINK_PATTERN.test(trimmed)) return null;
   let parsed;
   try {
-    parsed = new URL(trimmed);
+    parsed = new URL(trimmed, NOTIFY_DASHBOARD_URL);
   } catch {
     return null;
   }
@@ -75,9 +86,17 @@ function normalizeSuppressedUrl(raw) {
  */
 function normalizeSuppressedHost(raw) {
   if (typeof raw !== 'string') return null;
-  const host = raw.trim().toLowerCase().replace(/\.+$/, '');
+  let host = raw.trim().toLowerCase().replace(/\.+$/, '');
   if (host.length === 0 || host.length > 253) return null;
-  if (host.includes('/') || host.includes(':') || host.includes('?') || host.includes('#')) return null;
+  if (host.includes('/') || host.includes(':') || host.includes('?') || host.includes('#') || host.includes('@') || host.includes('\\')) return null;
+  // An IDN entry must compare against the punycode host a URL parses to.
+  if (/[^\x00-\x7f]/.test(host)) {
+    try {
+      host = new URL(`http://${host}`).hostname.replace(/\.+$/, '');
+    } catch {
+      return null;
+    }
+  }
   // Hostname labels, not free text: letters, digits, hyphens, dots.
   if (!/^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/.test(host)) return null;
   return host;

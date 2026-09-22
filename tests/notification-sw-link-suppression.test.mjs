@@ -115,6 +115,23 @@ describe('notification-suppressions edge endpoint (#8401)', () => {
     assert.ok(!warnings.join('\n').includes(EVIL));
   });
 
+  it('keeps non-ASCII host entries as the punycode host a URL parses to', async () => {
+    globalThis.fetch = async () => ({ ok: true, json: async () => ({ result: ['host:b\u00fccher.example'] }) });
+    const { default: handler } = await import('../api/notification-suppressions.js?edge-idn');
+    const res = await handler(new Request('https://worldmonitor.app/api/notification-suppressions'));
+    assert.deepEqual((await res.json()).hosts, ['xn--bcher-kva.example']);
+  });
+
+  it('refuses query strings so a random query cannot bypass the shared cache into Redis', async () => {
+    let redisReads = 0;
+    globalThis.fetch = async () => { redisReads++; return { ok: true, json: async () => ({ result: [] }) }; };
+    const { default: handler } = await import('../api/notification-suppressions.js?edge-query');
+    const res = await handler(new Request('https://worldmonitor.app/api/notification-suppressions?bust=123'));
+    assert.equal(res.status, 400);
+    assert.equal(redisReads, 0, 'a cache-busting query must not reach Redis');
+    assert.match(res.headers.get('Cache-Control') ?? '', /s-maxage/, 'the refusal itself is cacheable');
+  });
+
   it('rejects non-GET methods', async () => {
     const { default: handler } = await import('../api/notification-suppressions.js?edge-method');
     const res = await handler(new Request('https://worldmonitor.app/api/notification-suppressions', { method: 'POST' }));
@@ -287,6 +304,32 @@ describe('push-handler.js notificationclick suppression (#8401)', () => {
     await ev.waits[0];
     assert.equal(box.cacheStore.has('/api/notification-suppressions'), true);
     assert.equal(box.opened, null);
+  });
+
+  it('a suppressed off-origin link never opens its own tab (check precedes the crossOrigin branch)', async () => {
+    for (const url of ['https://www.evil.example/a', '//evil.example/x']) {
+      const box = makeSwSandbox({ snapshot: { suppressed: [], hosts: ['evil.example'] } });
+      let navigated = null;
+      box.windowClients.push({
+        url: 'https://worldmonitor.app/',
+        focus: async () => {},
+        navigate: async (to) => { navigated = to; },
+      });
+      const ev = notifClickEvent({ url });
+      box.emit('notificationclick', ev);
+      for (const p of ev.waits) await p;
+      assert.equal(box.opened, null, `${url}: a blocked off-origin link must not get a new tab`);
+      assert.equal(navigated, null, `${url}: nor be handed the dashboard tab`);
+      assert.equal(box.shown.length, 1, `${url}: the blocked notice replaces it`);
+    }
+  });
+
+  it('an unblocked off-origin link still opens its own tab after the check', async () => {
+    const box = makeSwSandbox({ snapshot: { suppressed: [], hosts: ['evil.example'] } });
+    const ev = notifClickEvent({ url: 'https://reuters.com/world/story' });
+    box.emit('notificationclick', ev);
+    for (const p of ev.waits) await p;
+    assert.equal(box.opened, 'https://reuters.com/world/story');
   });
 
   it('clean click opens as before when nothing is blocked', async () => {

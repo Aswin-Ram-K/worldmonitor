@@ -25,6 +25,7 @@ const {
   parseSuppressionEntries,
   isLinkSuppressed,
 } = require(resolve(__dirname, '..', 'scripts', 'shared', 'notification-link-suppression.cjs'));
+const { classifyNotificationLink } = require(resolve(__dirname, '..', 'scripts', 'shared', 'notify-fields.cjs'));
 
 const EVIL = 'https://evil.example/phish?x=1';
 
@@ -109,5 +110,42 @@ describe('notification link suppression matcher (#8401)', () => {
     assert.equal(p.hosts.size, 1);
     assert.equal(p.urls.size, 1);
     assert.equal(isLinkSuppressed('https://sub.evil.example/', p), true);
+  });
+
+  it('non-ASCII host entries match the punycode host a URL parses to', () => {
+    const p = parsed(`${HOST_ENTRY_PREFIX}b\u00fccher.example`);
+    assert.equal(p.hosts.has('xn--bcher-kva.example'), true, 'IDN entry must be kept, not dropped');
+    assert.equal(isLinkSuppressed('https://b\u00fccher.example/x', p), true);
+    assert.equal(isLinkSuppressed('https://xn--bcher-kva.example/x', p), true);
+    assert.equal(normalizeSuppressedHost('evil.example/path'), null);
+  });
+
+  it('scheme-relative and backslash spellings resolve like the delivery classifier', () => {
+    // classifyNotificationLink resolves these against the dashboard base and
+    // email/Telegram/Slack/Discord deliver https://evil.example/x, so a
+    // matcher that parses them base-less (null) lets them bypass host:.
+    const p = parsed(`${HOST_ENTRY_PREFIX}evil.example`);
+    for (const spelling of ['//evil.example/x', '/\\evil.example/x']) {
+      assert.equal(normalizeSuppressedUrl(spelling), 'https://evil.example/x', spelling);
+      assert.equal(isLinkSuppressed(spelling, p), true, `${spelling} must be host-suppressed`);
+    }
+    assert.equal(isLinkSuppressed('//evil.example/x', parsed('https://evil.example/x')), true,
+      'an exact entry must also catch the scheme-relative spelling');
+  });
+
+  it('agrees with classifyNotificationLink on every link it would deliver', () => {
+    const vectors = [
+      'https://evil.example/x', '//evil.example/x', '/\\evil.example/x', '\\\\evil.example/x',
+      '/relative/path', 'https://EVIL.example:443/a', 'evil.example/x', 'not a url',
+      'javascript:alert(1)', 'https://www.evil.example./x?q=1#h',
+    ];
+    for (const v of vectors) {
+      const classified = classifyNotificationLink(v);
+      if (classified.kind !== 'article') continue;
+      const normalized = normalizeSuppressedUrl(v);
+      assert.ok(normalized, `${v} is delivered as ${classified.url}, so the matcher must see it`);
+      assert.equal(new URL(normalized).hostname, classified.host.replace(/\.+$/, ''), v);
+      assert.equal(isLinkSuppressed(v, parsed(`${HOST_ENTRY_PREFIX}${classified.host.replace(/\.+$/, '')}`)), true, v);
+    }
   });
 });

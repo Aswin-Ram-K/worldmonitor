@@ -28,6 +28,12 @@ import { getRedisCredentials } from './_upstash-json.js';
 const SUPPRESSIONS_KEY = 'notif:blocked-links:v1';
 const HOST_PREFIX = 'host:';
 const URL_DIGEST_PREFIX = 'sha256:';
+// Same resolution rule as the relay matcher and the delivery classifier
+// (scripts/shared/notify-fields.cjs classifyNotificationLink).
+const LINK_RESOLUTION_BASE = 'https://worldmonitor.app/';
+const RESOLVABLE_LINK_PATTERN = /^(?:[a-z][a-z0-9+.-]*:|\/)/i;
+// One shared cache entry: the refusal of a query string is itself cached.
+const CACHEABLE_HEADERS = { 'Cache-Control': 'public, s-maxage=60, stale-while-revalidate=30' };
 
 function warnUnavailable(reason, context = '') {
   const suffix = context ? ` ${context}` : '';
@@ -38,9 +44,10 @@ function normalizeUrl(raw) {
   if (typeof raw !== 'string') return null;
   const trimmed = raw.trim();
   if (trimmed.length === 0) return null;
+  if (!RESOLVABLE_LINK_PATTERN.test(trimmed)) return null;
   let parsed;
   try {
-    parsed = new URL(trimmed);
+    parsed = new URL(trimmed, LINK_RESOLUTION_BASE);
   } catch {
     return null;
   }
@@ -63,9 +70,18 @@ function normalizeUrl(raw) {
 
 function normalizeHost(raw) {
   if (typeof raw !== 'string') return null;
-  const host = raw.trim().toLowerCase().replace(/\.+$/, '');
+  let host = raw.trim().toLowerCase().replace(/\.+$/, '');
   if (host.length === 0 || host.length > 253) return null;
-  if (host.includes('/') || host.includes(':') || host.includes('?') || host.includes('#')) return null;
+  if (host.includes('/') || host.includes(':') || host.includes('?') || host.includes('#') || host.includes('@') || host.includes('\\')) return null;
+  // An IDN entry must be published as the punycode host a URL parses to,
+  // which is what the service worker compares against.
+  if (/[^\x00-\x7f]/.test(host)) {
+    try {
+      host = new URL(`http://${host}`).hostname.replace(/\.+$/, '');
+    } catch {
+      return null;
+    }
+  }
   if (!/^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/.test(host)) return null;
   return host;
 }
@@ -142,6 +158,12 @@ export default async function handler(req) {
   if (req.method !== 'GET') {
     return jsonResponse({ error: 'Method not allowed' }, 405, cors);
   }
+  // The service worker never sends a query. Refusing one keeps the shared
+  // cache keyed on the path alone, so a random `?bust=` cannot turn this
+  // anonymous endpoint into an uncached Redis read per request.
+  if (new URL(req.url).search) {
+    return jsonResponse({ error: 'Unexpected query string' }, 400, { ...cors, ...CACHEABLE_HEADERS });
+  }
 
   const creds = getRedisCredentials();
   if (!creds) {
@@ -182,6 +204,6 @@ export default async function handler(req) {
     // 60s shared cache: fast enough for incident response (the SW also
     // revalidates per click past its own TTL), slow enough to absorb a
     // click storm on one hostile notification.
-    'Cache-Control': 'public, s-maxage=60, stale-while-revalidate=30',
+    ...CACHEABLE_HEADERS,
   });
 }

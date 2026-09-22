@@ -115,7 +115,9 @@ async function upstashDedupSetNx(key) {
 //
 // Consulted once per event in processEvent before any delivery, so a blocked
 // link stops every channel (email, Telegram, Slack, Discord, web push,
-// webhook, quiet-hours batch) at once. The service worker consults the same
+// webhook) at once, and again per held event when a quiet-hours batch drains
+// (drainHeldForUser), so a link blocked while an event sat in the queue does
+// not ride out in the batch. The service worker consults the same
 // set via the edge read endpoint for already-delivered push payloads —
 // relay-side suppression alone cannot revoke those. Suppressed deliveries
 // are logged with the [relay][link-suppressed] prefix so the blast radius
@@ -124,8 +126,13 @@ const BLOCKED_LINKS_KEY = 'notif:blocked-links:v1';
 const BLOCKED_LINKS_LOG_KEY = 'notif:link-suppressions:v1';
 const BLOCKED_LINKS_LOG_TTL = 30 * 24 * 3600; // 30 days — incident scoping, not cache
 const BLOCKED_LINKS_UNREADABLE_TTL_MS = 60 * 1000;
+// How long a last-known snapshot may stand in for an unreadable set. Within
+// it, an incident block survives a Redis blip; past it, the snapshot is
+// dropped (fail-open, per the contract above) with an error-level log rather
+// than silently enforcing — or silently un-enforcing — a list of unknown age.
+const BLOCKED_LINKS_SNAPSHOT_MAX_AGE_MS = 15 * 60 * 1000;
 
-let blockedLinksCache = { entries: null, fetchedAtMs: 0 };
+let blockedLinksCache = { entries: null, fetchedAtMs: 0, snapshotAtMs: 0 };
 
 async function readBlockedLinkSet(fetchImpl = fetch) {
   try {
@@ -161,11 +168,19 @@ async function getBlockedLinkSet(fetchImpl = fetch) {
     // tell the operator the control is currently unreadable. Stamp the
     // attempt time so a sustained outage logs once per TTL window instead
     // of firing an SMEMBERS + warn per event under an event storm.
+    const snapshotAgeMs = blockedLinksCache.entries ? nowMs - blockedLinksCache.snapshotAtMs : null;
+    if (snapshotAgeMs !== null && snapshotAgeMs > BLOCKED_LINKS_SNAPSHOT_MAX_AGE_MS) {
+      console.error(`[relay][link-suppressed-stale] blocked-link set unreadable and the last-known snapshot is ${Math.round(snapshotAgeMs / 1000)}s old (max ${BLOCKED_LINKS_SNAPSHOT_MAX_AGE_MS / 1000}s); dropping it and failing open until Redis is readable`);
+      blockedLinksCache = { entries: null, fetchedAtMs: nowMs, snapshotAtMs: 0, readable: false };
+      return blockedLinksCache;
+    }
     blockedLinksCache = { ...blockedLinksCache, fetchedAtMs: nowMs, readable: false };
-    console.warn('[relay][link-suppressed-unreadable] blocked-link set unreadable; continuing with last-known snapshot');
+    console.warn(snapshotAgeMs === null
+      ? '[relay][link-suppressed-unreadable] blocked-link set unreadable and no snapshot is held; failing open'
+      : `[relay][link-suppressed-unreadable] blocked-link set unreadable; continuing with last-known snapshot age=${Math.round(snapshotAgeMs / 1000)}s`);
     return blockedLinksCache;
   }
-  blockedLinksCache = { entries: read.entries, fetchedAtMs: nowMs, readable: true };
+  blockedLinksCache = { entries: read.entries, fetchedAtMs: nowMs, snapshotAtMs: nowMs, readable: true };
   return blockedLinksCache;
 }
 
@@ -176,6 +191,26 @@ function eventLinks(event) {
   if (typeof link === 'string' && link.length > 0) links.push(link);
   if (typeof url === 'string' && url.length > 0 && url !== link) links.push(url);
   return links;
+}
+
+/**
+ * The links of `event` the operator set blocks, or [] when none are (or no
+ * snapshot is held — fail-open). Logs the [relay][link-suppressed] line and
+ * the incident record when something matched.
+ */
+async function suppressedLinksFor(event, matchedRuleCount, context) {
+  const links = eventLinks(event);
+  if (links.length === 0) return [];
+  const snapshot = await getBlockedLinkSet();
+  if (!snapshot.entries) return [];
+  const parsed = parseSuppressionEntries(snapshot.entries);
+  const suppressed = links.filter((l) => isLinkSuppressed(l, parsed));
+  if (suppressed.length === 0) return [];
+  const safeLinks = suppressed.map((l) => String(l).replace(/[\r\n]/g, ' ').slice(0, 200));
+  const safeType = String(event.eventType ?? 'unknown').replace(/[\r\n]/g, ' ').slice(0, 80);
+  console.log(`[relay][link-suppressed] ${context} eventType=${safeType} rules=${matchedRuleCount} links=${safeLinks.join(',')}`);
+  await logLinkSuppression(event, matchedRuleCount).catch(() => {});
+  return suppressed;
 }
 
 async function logLinkSuppression(event, matchedRuleCount, fetchImpl = fetch) {
@@ -361,7 +396,13 @@ async function drainHeldForUser(userId, variant, allowedChannelTypes) {
   const items = await upstashRest('LRANGE', key, '0', '-1');
   if (!Array.isArray(items) || items.length === 0) return;
 
-  const events = items.map(i => { try { return JSON.parse(i); } catch { return null; } }).filter(Boolean);
+  const parsedEvents = items.map(i => { try { return JSON.parse(i); } catch { return null; } }).filter(Boolean);
+  // Re-check the operator set: a link blocked while the event sat in the
+  // queue must not go out in the batch (#8401).
+  const events = [];
+  for (const ev of parsedEvents) {
+    if ((await suppressedLinksFor(ev, 1, 'stage=quiet-hours-drain')).length === 0) events.push(ev);
+  }
   if (events.length === 0) { await upstashRest('DEL', key); return; }
 
   const lines = [`WorldMonitor — ${events.length} held alert${events.length !== 1 ? 's' : ''} from quiet hours`, ''];
@@ -1568,22 +1609,8 @@ async function processEvent(event) {
   // blank notifications — but never silent: unreadable reads log loudly.
   // Suppression count is derived from the pre-PRO rule match so the log line
   // scopes the incident even when some rules would later drop on entitlement.
-  const links = eventLinks(event);
-  if (matching.length > 0 && links.length > 0) {
-    const snapshot = await getBlockedLinkSet();
-    if (snapshot.readable === false && !snapshot.entries) {
-      // No snapshot at all (never read successfully): nothing to match on.
-    } else {
-      const parsed = parseSuppressionEntries(snapshot.entries ?? []);
-      const suppressed = links.filter((l) => isLinkSuppressed(l, parsed));
-      if (suppressed.length > 0) {
-        const safeLinks = suppressed.map((l) => String(l).replace(/[\r\n]/g, ' ').slice(0, 200));
-        const safeType = String(event.eventType ?? 'unknown').replace(/[\r\n]/g, ' ').slice(0, 80);
-        console.log(`[relay][link-suppressed] eventType=${safeType} rules=${matching.length} links=${safeLinks.join(',')}`);
-        await logLinkSuppression(event, matching.length).catch(() => {});
-        return;
-      }
-    }
+  if (matching.length > 0 && (await suppressedLinksFor(event, matching.length, 'stage=deliver')).length > 0) {
+    return;
   }
 
   if (matching.length === 0) return;
@@ -1803,7 +1830,8 @@ module.exports = {
   logLinkSuppression,
   BLOCKED_LINKS_KEY,
   BLOCKED_LINKS_LOG_KEY,
-  __resetBlockedLinkCacheForTests: () => { blockedLinksCache = { entries: null, fetchedAtMs: 0 }; },
+  BLOCKED_LINKS_SNAPSHOT_MAX_AGE_MS,
+  __resetBlockedLinkCacheForTests: () => { blockedLinksCache = { entries: null, fetchedAtMs: 0, snapshotAtMs: 0 }; },
   // Exported for the same reason as eventMatchesCountryScope: the ticker-scope
   // tests previously kept hand-copied mirrors of these, which cannot fail when
   // the real ones change.
