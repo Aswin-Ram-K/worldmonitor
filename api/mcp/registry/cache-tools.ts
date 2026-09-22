@@ -76,6 +76,22 @@ function resolveEurostatCountryFilter(raw: unknown): string[] {
   });
 }
 
+function hoistDisplacementSummary(data: Record<string, unknown>): void {
+  // Seed writes `{ summary: { year, countries, topFlows } }`. executeTool then
+  // files that value under the cache-key label `summary`, so the live envelope
+  // is `data.summary.summary.{countries,topFlows}`. Hoist so cap/narrow/schema
+  // and `summary: true` see the advertised `data.summary.countries` path.
+  const labeled = data.summary;
+  if (!labeled || typeof labeled !== 'object' || Array.isArray(labeled)) return;
+  const outer = labeled as Record<string, unknown>;
+  const inner = outer.summary;
+  if (!inner || typeof inner !== 'object' || Array.isArray(inner)) return;
+  if (Array.isArray(outer.countries) || Array.isArray(outer.topFlows)) return;
+  const nested = inner as Record<string, unknown>;
+  if (!Array.isArray(nested.countries) && !Array.isArray(nested.topFlows)) return;
+  data.summary = inner;
+}
+
 // Iran-events domain sunset (war ended 2026-07). Default OFF: drop the dormant
 // conflict:iran-events:v1 key from the get_conflict_events cache set so the MCP
 // tool stops serving the stale snapshot that lingers for the key's 14-day TTL.
@@ -1870,6 +1886,7 @@ export const CACHE_TOOLS: ToolDef[] = [
     }),
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     _postFilter: (data, params) => {
+      hoistDisplacementSummary(data);
       const countries = resolveCountryFilter(params.countries, 'countries');
       const codes = [...countries, ...compact(countries.map((code) => ISO2_TO_ISO3[code.toUpperCase()]?.toLowerCase()))];
       const limit = (argNum(params.limit) ?? DEFAULT_LIST_LIMIT);

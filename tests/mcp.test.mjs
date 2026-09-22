@@ -1890,24 +1890,102 @@ describe('api/mcp.ts — PRO MCP Server', () => {
     assert.equal(Object.keys(optOut.data['industrial-production'].countries).length, 40, 'limit: 0 → full payload');
   });
 
+  function seederDisplacementCache({ countryCount = 60, flowCount = 60 } = {}) {
+    // Matches scripts/seed-displacement-summary.mjs: `{ summary: { year, countries, topFlows } }`.
+    // executeTool then files that value under the cache-key label `summary`.
+    return {
+      summary: {
+        year: 2025,
+        globalTotals: { refugees: 1, asylumSeekers: 1, idps: 1, stateless: 0, total: 3 },
+        countries: Array.from({ length: countryCount }, (_, i) => ({
+          code: `C${String(i).padStart(3, '0')}`,
+          name: `Country ${i}`,
+          refugees: i,
+          asylumSeekers: 0,
+          idps: 0,
+          stateless: 0,
+          totalDisplaced: i,
+          hostRefugees: 0,
+          hostAsylumSeekers: 0,
+          hostTotal: 0,
+        })),
+        topFlows: Array.from({ length: flowCount }, (_, i) => ({
+          originCode: `O${i}`,
+          originName: `Origin ${i}`,
+          asylumCode: `A${i}`,
+          asylumName: `Asylum ${i}`,
+          refugees: Math.max(1, 10_000 - i),
+        })),
+      },
+    };
+  }
+
   it('limit: get_displacement_data default args → ≤30 items, limit:0 → full payload', async () => {
     const currentYear = new Date().getUTCFullYear();
-    const summary = {
-      countries: Array.from({ length: 60 }, (_, i) => ({ iso3: `C${i}`, refugees: i, idps: i })),
-      topFlows: Array.from({ length: 60 }, (_, i) => ({ originCode: `O${i}`, asylumCode: `A${i}`, count: i })),
-    };
+    const summary = seederDisplacementCache({ countryCount: 60, flowCount: 60 });
     const dataKey = `displacement:summary:v1:${currentYear}`;
     const meta = { 'seed-meta:displacement:summary': { fetchedAt: Date.now() - 60_000, recordCount: 60 } };
 
     mockCacheKeys({ [dataKey]: summary }, meta);
     const def = await callTool('get_displacement_data', {});
+    assert.equal(def._budget_exceeded, undefined, 'default args must return data, not the budget envelope');
     assert.equal(def.data.summary.countries.length, 30, 'default args → countries capped to 30');
     assert.equal(def.data.summary.topFlows.length, 30, 'default args → topFlows capped to 30');
+    assert.equal(def.data.summary.year, 2025, 'hoist exposes year on data.summary, not data.summary.summary');
+    assert.equal(def.data.summary.summary, undefined, 'seeder wrapper must not remain nested under data.summary');
 
     mockCacheKeys({ [dataKey]: summary }, meta);
     const full = await callTool('get_displacement_data', { limit: 0 });
     assert.equal(full.data.summary.countries.length, 60, 'limit: 0 → full countries array');
     assert.equal(full.data.summary.topFlows.length, 60, 'limit: 0 → full topFlows array');
+  });
+
+  it('get_displacement_data default args with production-scale nested lists stay under budget', async () => {
+    const currentYear = new Date().getUTCFullYear();
+    const summary = seederDisplacementCache({ countryCount: 212, flowCount: 4837 });
+    const dataKey = `displacement:summary:v1:${currentYear}`;
+    const meta = { 'seed-meta:displacement:summary': { fetchedAt: Date.now() - 60_000, recordCount: 212 } };
+    mockCacheKeys({ [dataKey]: summary }, meta);
+    const out = await callTool('get_displacement_data', {});
+    assert.equal(out._budget_exceeded, undefined, 'production-scale seed must not trip _budget_exceeded on default args');
+    assert.equal(out.data.summary.countries.length, 30);
+    assert.equal(out.data.summary.topFlows.length, 30);
+  });
+
+  it('get_displacement_data countries + summary:true operate on the hoisted seeder lists', async () => {
+    const currentYear = new Date().getUTCFullYear();
+    const summary = {
+      summary: {
+        year: 2025,
+        countries: [
+          { code: 'IRQ', name: 'Iraq', refugees: 1 },
+          { code: 'IRN', name: 'Iran', refugees: 2 },
+          { code: 'SYR', name: 'Syria', refugees: 3 },
+        ],
+        topFlows: [
+          { originCode: 'IRQ', asylumCode: 'DEU', refugees: 10 },
+          { originCode: 'SYR', asylumCode: 'IRQ', refugees: 11 },
+          { originCode: 'IRN', asylumCode: 'DEU', refugees: 12 },
+        ],
+      },
+    };
+    const dataKey = `displacement:summary:v1:${currentYear}`;
+    const meta = { 'seed-meta:displacement:summary': { fetchedAt: Date.now() - 60_000, recordCount: 3 } };
+
+    mockCacheKeys({ [dataKey]: summary }, meta);
+    const narrowed = await callTool('get_displacement_data', { countries: ['IQ'] });
+    assert.deepEqual(narrowed.data.summary.countries.map((c) => c.code), ['IRQ']);
+    assert.deepEqual(
+      narrowed.data.summary.topFlows.map((f) => `${f.originCode}->${f.asylumCode}`),
+      ['IRQ->DEU', 'SYR->IRQ'],
+    );
+
+    mockCacheKeys({ [dataKey]: summary }, meta);
+    const summarized = await callTool('get_displacement_data', { summary: true, limit: 0 });
+    assert.equal(summarized.data.summary.countries.count, 3);
+    assert.equal(summarized.data.summary.countries.sample.length, 3);
+    assert.equal(summarized.data.summary.topFlows.count, 3);
+    assert.equal(summarized.data.summary.year, 2025);
   });
 
   it('summary mode: collapses arrays to {count, sample} and large entity maps to {count, sample_keys}', async () => {
@@ -1956,13 +2034,15 @@ describe('api/mcp.ts — PRO MCP Server', () => {
 
     const currentYear = new Date().getUTCFullYear();
     const expectedDataKey = `displacement:summary:v1:${currentYear}`;
-    const summaryPayload = {
+    const innerSummary = {
       year: currentYear,
       countries: [
-        { iso3: 'SYR', refugees: 6_700_000, idps: 6_900_000 },
-        { iso3: 'UKR', refugees: 5_900_000, idps: 3_700_000 },
+        { code: 'SYR', refugees: 6_700_000, idps: 6_900_000 },
+        { code: 'UKR', refugees: 5_900_000, idps: 3_700_000 },
       ],
+      topFlows: [],
     };
+    const summaryPayload = { summary: innerSummary };
     const seedFetchedAt = Date.now() - 60 * 60_000; // 1h old — well inside 3600 min budget
 
     globalThis.fetch = async (url) => {
@@ -1993,7 +2073,7 @@ describe('api/mcp.ts — PRO MCP Server', () => {
     const payload = JSON.parse(body.result.content[0].text);
     assert.equal(payload.stale, false, 'fresh meta within budget must yield stale=false');
     assert.equal(payload.cached_at, new Date(seedFetchedAt).toISOString(), 'cached_at must reflect seed-meta fetchedAt');
-    assert.deepEqual(payload.data.summary, summaryPayload, 'label-walk strips year+v1, exposes payload under data.summary');
+    assert.deepEqual(payload.data.summary, innerSummary, 'seeder wrapper is hoisted so data.summary is the UNHCR payload');
   });
 
   it('get_displacement_data returns -32603 when cache is empty (cache_all_null)', async () => {

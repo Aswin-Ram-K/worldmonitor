@@ -27,6 +27,19 @@ const cases = [
   ['get_country_macro', 'countries', { macro: { countries: { IQ: { value: 1 }, IR: { value: 2 } } } }],
   ['get_displacement_data', 'countries', { summary: { countries: [{ code: 'IRQ' }, { code: 'IRN' }], topFlows: [{ originCode: 'IRQ', asylumCode: 'DEU' }, { originCode: 'SYR', asylumCode: 'IRQ' }, { originCode: 'IRN', asylumCode: 'DEU' }] } }],
 ];
+const seederWrappedDisplacement = {
+  summary: {
+    summary: {
+      year: 2025,
+      countries: [{ code: 'IRQ' }, { code: 'IRN' }],
+      topFlows: [
+        { originCode: 'IRQ', asylumCode: 'DEU' },
+        { originCode: 'SYR', asylumCode: 'IRQ' },
+        { originCode: 'IRN', asylumCode: 'DEU' },
+      ],
+    },
+  },
+};
 for (const [name, field, fixture] of cases) {
   it(`${name} resolves country filters and rejects unresolved entries`, () => {
     const tool = TOOL_REGISTRY.find((tool) => tool.name === name);
@@ -45,6 +58,18 @@ for (const [name, field, fixture] of cases) {
     assert.deepEqual(filter({ [field]: [] }), filter({}));
   });
 }
+
+it('get_displacement_data hoists the seeder summary wrapper before narrowing', () => {
+  const tool = TOOL_REGISTRY.find((entry) => entry.name === 'get_displacement_data');
+  assert.ok(tool);
+  const filter = (input) => tool._postFilter(structuredClone(seederWrappedDisplacement), input);
+  const expected = filter({ countries: 'IQ' });
+  assert.equal(expected.summary.summary, undefined, 'inner seeder wrapper must be hoisted away');
+  assert.deepEqual(expected.summary.countries.map((c) => c.code), ['IRQ']);
+  assert.doesNotMatch(JSON.stringify(expected), /"IRN"/);
+  assert.equal(expected.summary.year, 2025);
+  assert.notDeepEqual(expected, filter({}), 'wrapped fixture must prove narrowing');
+});
 
 it('country validation reaches callers as Invalid params through dispatch', async () => {
   process.env.MCP_TELEMETRY = 'false';

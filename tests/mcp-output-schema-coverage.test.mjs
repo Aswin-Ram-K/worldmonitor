@@ -1077,6 +1077,70 @@ describe('api/mcp.ts — per-tool outputSchema coverage (v1.7.0)', () => {
     );
   });
 
+  it('get_displacement_data structuredContent from the seeder nesting validates the advertised schema', async () => {
+    // Cache-contract tests stub Redis with `{}`, which never exercises the extra
+    // `summary` wrapper seed-displacement-summary.mjs writes. A real payload that
+    // still has data.summary.summary would advertise countries/topFlows at the
+    // wrong path and still pass Ajv (those fields are not required).
+    process.env.UPSTASH_REDIS_REST_URL = 'https://stub.upstash';
+    process.env.UPSTASH_REDIS_REST_TOKEN = 'stub';
+    process.env.MCP_TELEMETRY = 'false';
+    const originalFetch = globalThis.fetch;
+    const currentYear = new Date().getUTCFullYear();
+    const inner = {
+      year: currentYear,
+      countries: [{ code: 'SYR', total: 6_700_000 }],
+      topFlows: [{ originCode: 'SYR', asylumCode: 'DEU', value: 1000 }],
+    };
+    const seed = { summary: inner };
+    globalThis.fetch = async (url) => {
+      const u = url.toString();
+      if (u.includes(`/get/${encodeURIComponent(`displacement:summary:v1:${currentYear}`)}`)) {
+        return new Response(JSON.stringify({ result: JSON.stringify(seed) }), {
+          status: 200, headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (u.includes('/get/seed-meta%3Adisplacement%3Asummary')) {
+        return new Response(JSON.stringify({
+          result: JSON.stringify({ fetchedAt: Date.now() - 60_000, recordCount: 1 }),
+        }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+      return new Response(JSON.stringify({}), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    };
+    try {
+      const handler = mod.default;
+      const res = await handler(new Request('https://worldmonitor.app/mcp', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-WorldMonitor-Key': VALID_KEY,
+        },
+        body: JSON.stringify({
+          jsonrpc: '2.0', id: 1, method: 'tools/call',
+          params: { name: 'get_displacement_data', arguments: {} },
+        }),
+      }));
+      assert.equal(res.status, 200);
+      const body = await res.json();
+      const sc = body.result?.structuredContent;
+      assert.ok(sc && sc._budget_exceeded !== true, 'plain call must return data, not the budget envelope');
+      assert.ok(Array.isArray(sc.data?.summary?.countries), 'advertised path data.summary.countries must be an array');
+      assert.ok(Array.isArray(sc.data?.summary?.topFlows), 'advertised path data.summary.topFlows must be an array');
+      assert.equal(sc.data.summary.summary, undefined);
+      const publicTool = mod.TOOL_LIST_RESPONSE.find((tool) => tool.name === 'get_displacement_data');
+      const ajv = new Ajv2020({
+        allErrors: true, allowUnionTypes: true, strict: true, strictRequired: false, validateFormats: false,
+      });
+      const validateAdvertised = ajv.compile(publicTool.outputSchema);
+      assert.ok(
+        validateAdvertised(sc),
+        `structuredContent fails advertised outputSchema:\n  ${(validateAdvertised.errors ?? []).slice(0, 5).map((e) => `${e.instancePath || '/'} ${e.message}`).join('\n  ')}`,
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it('undeclaredSafetyFlags reports a dropped degraded-state flag (positive control)', () => {
     const wireProps = {
       countryCode: { type: 'string' },
