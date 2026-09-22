@@ -96,6 +96,11 @@ COPY scripts/shared/notification-dedup.cjs ./scripts/shared/notification-dedup.c
 # that keeps this COPY list and that claim honest.
 # Guarded by tests/notify-fields-parity.test.mjs (behaviour parity).
 COPY scripts/shared/notify-fields.cjs ./scripts/shared/notify-fields.cjs
+# notification-link-suppression.cjs is the operator blocked-link matcher
+# (#8401) required by notification-relay.cjs; it requires notify-fields.cjs
+# above. Same guard caveat: pinned explicitly in
+# tests/dockerfile-relay-imports.test.mjs because the BFS cannot reach it.
+COPY scripts/shared/notification-link-suppression.cjs ./scripts/shared/notification-link-suppression.cjs
 # market-hours.cjs gates the equity portion of the relay market seed loop on
 # the US-equity session (#4922d). Missing it = ERR_MODULE_NOT_FOUND at startup.
 COPY scripts/shared/market-hours.cjs ./scripts/shared/market-hours.cjs
