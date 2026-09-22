@@ -10229,9 +10229,6 @@
           "path": "scripts/measure-tools-list-compression.mjs"
         },
         {
-          "path": "scripts/notification-relay.cjs"
-        },
-        {
           "path": "scripts/publish-mcp-registry.mjs"
         },
         {
@@ -14365,6 +14362,9 @@
         },
         {
           "path": "scripts/measure-desktop-mainthread.mjs"
+        },
+        {
+          "path": "scripts/notification-relay.cjs"
         },
         {
           "path": "scripts/seo-indexnow-submit.mjs"

@@ -427,7 +427,7 @@ async function drainHeldForUser(userId, variant, allowedChannelTypes) {
         ok = await sendWebPush(userId, ch, {
           title: `WorldMonitor · ${events.length} held alert${events.length === 1 ? '' : 's'}`,
           body: subject,
-          url: 'https://worldmonitor.app/',
+          url: PUSH_DASHBOARD_PATH,
           tag: `quiet_hours_batch:${userId}`,
           eventType: 'quiet_hours_batch',
         });
@@ -798,6 +798,99 @@ function ensureVapidConfigured(client) {
   }
 }
 
+// Payload URLs originate from event.payload.link — published verbatim by Pro
+// accounts through /api/notify, or ingested verbatim from external RSS feeds.
+// Article links are the point of an rss_alert, so off-origin https targets
+// are kept; what must never happen is the service worker NAVIGATING the
+// user's already-open dashboard tab to one, which would replace a trusted
+// surface with a page WorldMonitor does not control. public/push-handler.js
+// owns that half: off-origin targets always get their own tab.
+//
+// The relay's half is scheme discipline — a javascript:, data: or http:
+// target must never be stored in a notification payload at all.
+// Resolution base ONLY — never returned. A relative base is not a legal base
+// (`new URL('/x', '/')` throws), so the sanitizer needs one absolute
+// first-party origin to parse against even though it emits none. This is the
+// single origin literal the push path is allowed to carry, and the
+// origin-literal pin below exempts it by name.
+const PUSH_PARSE_BASE = 'https://www.worldmonitor.app/';
+const PUSH_PARSE_BASE_ORIGIN = new URL(PUSH_PARSE_BASE).origin;
+
+// What we emit instead of an origin. Each service worker resolves this against
+// whichever host is serving it, so one payload works on www and on every
+// vertical subdomain.
+const PUSH_DASHBOARD_PATH = '/';
+
+// Generic aliases for "the dashboard", matched by EXACT hostname equality. The
+// vertical subdomains are deliberately absent: tech/finance/etc. are distinct
+// surfaces, so relativizing one would let another vertical's worker resolve it
+// onto itself and land the user on the wrong dashboard.
+const GENERIC_FIRST_PARTY_HOSTS = ['worldmonitor.app', 'www.worldmonitor.app'];
+
+// Paths Cloudflare serves on the apex (ARCHITECTURE.md §2). These must stay
+// absolute: relativizing /oauth/register destroys the apex origin before the
+// service worker — which can only recognize an ABSOLUTE apex URL — ever gets a
+// say, and a www redirect turns a registration POST into a GET (405, #4938).
+const APEX_SERVED_PATHS = [
+  /^\/mcp(?:\/|$)/,
+  /^\/oauth\//,
+  /^\/\.well-known\//,
+  /^\/robots\.txt$/,
+  /^\/security\.txt$/,
+];
+
+function safePushClickUrl(raw, userId) {
+  // A missing link is ordinary traffic on every plain brief_ready push, not a
+  // rejection — logging it would be noise.
+  if (typeof raw !== 'string' || raw.length === 0) return PUSH_DASHBOARD_PATH;
+
+  const reject = (reason) => {
+    console.warn(`[relay] push click URL rejected for ${userId ?? 'unknown'}: ${reason}`);
+    return PUSH_DASHBOARD_PATH;
+  };
+
+  let parsed;
+  try {
+    parsed = new URL(raw, PUSH_PARSE_BASE);
+  } catch (err) {
+    return reject(`unparseable (${err.message})`);
+  }
+  if (parsed.protocol !== 'https:') return reject(`scheme ${parsed.protocol}`);
+  // Embedded credentials exist only to make a hostile host read as ours.
+  if (parsed.username || parsed.password) return reject('embedded credentials');
+
+  // Off-origin articles and vertical-subdomain targets stay absolute: the
+  // worker gives them their own tab, which is the point of an rss_alert.
+  if (!GENERIC_FIRST_PARTY_HOSTS.includes(parsed.hostname)) return parsed.href;
+  if (APEX_SERVED_PATHS.some((re) => re.test(parsed.pathname))) return parsed.href;
+
+  const relative = parsed.pathname + parsed.search + parsed.hash;
+  // Detaching a path from its origin is where this gets dangerous: a URL can be
+  // first-party BY HOST and still have a pathname of //evil.com, which resolves
+  // straight back off-origin. Both laundering spellings arrive here as that
+  // same pathname, because the parser normalizes a backslash to a slash. We
+  // re-resolve and compare origins rather than testing the string's shape,
+  // because that is robust to ANY pathname the parser can produce — including
+  // authority-shaped ones a prefix test would have to enumerate.
+  let resolved;
+  try {
+    resolved = new URL(relative, PUSH_PARSE_BASE);
+  } catch {
+    return reject('path did not survive relativization');
+  }
+  if (resolved.origin !== PUSH_PARSE_BASE_ORIGIN) {
+    return reject('first-party host with an off-origin path');
+  }
+  // Return the RE-RESOLVED path, not the string we validated. They differ when
+  // the pathname is itself authority-shaped: '//www.worldmonitor.app/x' passes
+  // the origin check (it resolves back to us) but, handed to a worker on a
+  // vertical subdomain, re-resolves to www and pins the click off that
+  // worker's own origin — re-admitting the very coupling this emits relative
+  // paths to avoid. public/push-handler.js returns resolved.href for the same
+  // reason.
+  return resolved.pathname + resolved.search + resolved.hash;
+}
+
 /**
  * Deliver a web push notification to one subscription. Returns true on
  * success. On 404/410 (subscription gone) the channel is deactivated
@@ -815,7 +908,7 @@ async function sendWebPush(userId, subscription, payload) {
   const body = JSON.stringify({
     title: payload.title || 'WorldMonitor',
     body: payload.body || '',
-    url: payload.url || 'https://worldmonitor.app/',
+    url: safePushClickUrl(payload.url, userId),
     tag: payload.tag || 'worldmonitor-generic',
     eventType: payload.eventType,
   });
@@ -1270,7 +1363,7 @@ async function processWelcome(event) {
     await sendWebPush(userId, ch, {
       title: 'WorldMonitor connected',
       body: "You'll receive alerts here when events match your sensitivity settings.",
-      url: 'https://worldmonitor.app/',
+      url: PUSH_DASHBOARD_PATH,
       tag: `channel_welcome:${userId}`,
       eventType: 'channel_welcome',
     });
@@ -1697,6 +1790,7 @@ if (require.main === module) {
 
 module.exports = {
   processEvent,
+  safePushClickUrl,
   sendTelegram,
   checkDedup,
   upstashDedupSetNx,
