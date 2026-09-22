@@ -450,6 +450,11 @@ export class GlobalProcurementPanel extends Panel {
     this.loading = false;
     this.setCount(0);
     if (preservesAgentForm) {
+      // The declaring form stays mounted until the browser observes
+      // respondWith(). Write the reset filters into that same node now so the
+      // previous account's query is not still visible during the gap.
+      const retainedForm = this.settlingAgentForm ?? pending?.form;
+      if (retainedForm) this.syncRenderedFilters(retainedForm, false);
       this.deferAfterAgentSettlement(() => {
         if (
           this.settlingAgentForm !== null
