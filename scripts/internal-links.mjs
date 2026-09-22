@@ -7,7 +7,7 @@
  *   node scripts/internal-links.mjs apply [--report PATH]
  *   node scripts/internal-links.mjs related [--dry-run]
  *     (related reading for generated country, crisis and comparison pages,
- *      written to shared/related-reading.json; needs npm run build:crawlable-corpus)
+ *      written to scripts/data/related-reading.json; needs npm run build:crawlable-corpus)
  *
  * `propose` reads every English docs page in docs/docs.json and every blog
  * post, asks Jev one request per page (about $0.0005), and writes a report of
@@ -267,13 +267,13 @@ async function propose(opts) {
 }
 
 const RELATED_SECTIONS = new Set(['countries', 'crises', 'compare']);
-const RELATED_FILE = join(ROOT, 'shared/related-reading.json');
+const RELATED_FILE = join(ROOT, 'scripts/data/related-reading.json');
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 /**
  * Related reading for generated pages: of the blog posts and docs pages most
  * similar to each country, crisis and comparison page, the ones Jev is sure a
- * reader would want next. Rewrites shared/related-reading.json.
+ * reader would want next. Rewrites scripts/data/related-reading.json.
  */
 async function related(opts) {
   const readable = [...docsPages(), ...blogPages()].filter((p) => p.editable);

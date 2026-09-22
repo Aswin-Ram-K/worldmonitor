@@ -1661,7 +1661,7 @@ describe('crawlable corpus generator', () => {
       'scripts/comparison-page-narratives.mjs',
       'shared/source-attribution-manifest.json',
       'src/config/chokepoint-registry.ts',
-      'shared/related-reading.json',
+      'scripts/data/related-reading.json',
     ]);
   });
 

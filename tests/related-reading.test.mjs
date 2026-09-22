@@ -2,7 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 import { RELATED_READING_PATH, loadRelatedReading, renderRelatedReading } from '../scripts/related-reading.mjs';
 import { RELATED_RUBRIC, buildRelatedRequest, pickRelated } from '../scripts/lib/internal-links.mjs';
@@ -14,7 +14,7 @@ function fixtureRoot(pages) {
   mkdirSync(join(root, 'docs/panels'), { recursive: true });
   writeFileSync(join(root, 'docs/panels/hormuz-tracker.mdx'), '---\ntitle: Hormuz\n---\n');
   if (pages) {
-    mkdirSync(join(root, 'shared'), { recursive: true });
+    mkdirSync(dirname(join(root, RELATED_READING_PATH)), { recursive: true });
     writeFileSync(join(root, RELATED_READING_PATH), JSON.stringify({ pages }));
   }
   return root;

@@ -1,7 +1,7 @@
 /**
  * "Related reading" links on generated country, crisis and comparison pages.
  *
- * shared/related-reading.json maps a generated page path to at most three
+ * scripts/data/related-reading.json maps a generated page path to at most three
  * blog posts or docs pages that discuss its subject. It is written by
  * `node scripts/internal-links.mjs related` (Jev picks from TF-IDF
  * candidates) and reviewed like any committed content. The corpus build reads
@@ -11,7 +11,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-export const RELATED_READING_PATH = 'shared/related-reading.json';
+export const RELATED_READING_PATH = 'scripts/data/related-reading.json';
 export const MAX_RELATED_READING = 3;
 
 const docsFileExists = (rootDir, href) => {
