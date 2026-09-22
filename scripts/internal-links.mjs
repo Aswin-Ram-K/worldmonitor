@@ -37,6 +37,17 @@ const DEFAULT_REPORT = join(ROOT, 'node_modules/.cache/internal-links/report.jso
 
 const TARGET_ONLY_DOCS = new Set(['changelog', 'eula', 'privacy', 'terms', 'dpa', 'license']);
 
+// Map.groupBy needs Node 21; scripts/package.json still admits Node 20.
+function groupBy(items, keyFn) {
+  const groups = new Map();
+  for (const item of items) {
+    const k = keyFn(item);
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(item);
+  }
+  return groups;
+}
+
 const keyOf = (url) => canonicalHref(url, 'site');
 
 function page({ url, kind, file = null, title, name = title, about = '', headings = [], plain = '', hrefs = [], prose = [] }) {
@@ -138,7 +149,7 @@ function sitePages() {
   }
   // Every country page is titled "<Country> Country Instability Index": the
   // words a section's titles share are template, the rest is the page's name.
-  for (const group of Map.groupBy(out, (p) => p.section).values()) {
+  for (const group of groupBy(out, (p) => p.section).values()) {
     if (group.length < 3) continue;
     const split = group.map((p) => p.title.split(/\s+/));
     let shared = 0;
@@ -235,7 +246,7 @@ async function propose(opts) {
 function apply(opts) {
   const { links } = JSON.parse(readFileSync(opts.report, 'utf8'));
   if (!links) throw new Error(`${opts.report} holds no links: run propose without --dry-run`);
-  const byFile = Map.groupBy(links, (l) => l.sourceFile);
+  const byFile = groupBy(links, (l) => l.sourceFile);
   let placed = 0;
   for (const [file, fileLinks] of byFile) {
     const path = join(ROOT, file);
