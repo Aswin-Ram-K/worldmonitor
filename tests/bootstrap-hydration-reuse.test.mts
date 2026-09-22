@@ -432,16 +432,47 @@ describe('bootstrap hydration reuse (#7048)', () => {
     );
   });
 
-  it('imdCycloneMarine: parallel weather/natural loaders share one accepted snapshot (#8354)', async () => {
-    const snapshot = {
+  function imdSnapshotFixture(generatedAt: number) {
+    // Shapes follow the producer (scripts/lib/imd-cyclone-marine.mjs
+    // weatherAlertsFromSnapshot / marineBulletinsFromSnapshot) and every field
+    // main's mapImdSnapshot (#8374) copies, with allowlisted IMD source URLs.
+    return {
       coverageState: 'ok',
-      generatedAt: Date.now(),
-      cycloneEvents: [{ id: 'imd-cyclone-1', title: 'Cyclone X', category: 'tropicalCyclone', lat: 12, lon: 80, date: new Date().toISOString(), closed: false }],
-      portAlerts: [{ id: 'imd-port-1', title: 'Port warning', severity: 'watch' }],
-      marineBulletins: [{ id: 'imd-marine-1', title: 'Sea bulletin', severity: 'advisory' }],
+      generatedAt,
+      products: { cycloneTrack: { status: 'ok', recordCount: 1 }, portWarning: { status: 'ok', recordCount: 1 } },
+      cycloneEvents: [{
+        id: 'imd-BOB052026', title: 'Cyclonic Storm DANA', description: 'RSMC New Delhi advisory',
+        lat: 15.2, lon: 86.4, date: generatedAt - 3_600_000, categoryTitle: 'Tropical Cyclone', closed: false,
+        stormId: 'BOB052026', stormName: 'DANA', basin: 'NI', classification: 'CS', windKt: 45,
+        sourceName: 'India Meteorological Department', sourceUrl: 'https://rsmcnewdelhi.imd.gov.in/',
+        pastTrack: [{ lat: 14.8, lon: 87.1, windKt: 40, timestamp: generatedAt - 7_200_000, geometryKind: 'observed-track' }],
+        forecastTrack: [{ lat: 16.0, lon: 85.5, windKt: 55, hour: 24, category: 1, geometryKind: 'forecast-track' }],
+        conePolygon: [[[85, 15], [87, 15], [87, 17], [85, 17], [85, 15]]], coneGeometryKind: 'cone-of-uncertainty',
+        windRadii: [], agencyObservations: [],
+      }],
+      portAlerts: [{
+        id: 'imd-port-paradip-2026-09-22', event: 'IMD Port Warning', severity: 'Severe',
+        headline: 'Paradip: Hoist Distant Warning Signal Number Two', description: 'Hoist Distant Warning Signal Number Two',
+        areaDesc: 'Paradip', onset: generatedAt - 1_800_000, expires: generatedAt + 86_400_000,
+        coordinates: [[86.67, 20.26]], centroid: [86.67, 20.26], countryCode: 'IN', source: 'IMD port warning',
+        productKind: 'imd-port-warning', issuedBy: 'ACWC KOLKATA',
+        sourceUrl: 'https://rsmcnewdelhi.imd.gov.in/port-warning.php', geometryPrecision: 'point',
+      }],
+      marineBulletins: [{
+        id: 'imd-sea-bay-central', event: 'IMD Sea Area Bulletin', severity: 'Minor',
+        headline: 'Central Bay of Bengal: Rough sea', description: 'Wind: SW 20-25 kt · Visibility: 4-10 km · Sea: Rough',
+        areaDesc: 'Central Bay of Bengal', onset: generatedAt - 1_800_000, expires: generatedAt + 43_200_000,
+        coordinates: [[88, 15]], centroid: [88, 15], countryCode: 'IN', source: 'IMD sea area bulletin',
+        productKind: 'sea-area-bulletin', issuedBy: 'IMD Mumbai', wind: 'SW 20-25 kt', visibility: '4-10 km', seaState: 'Rough',
+        sourceUrl: 'https://mausam.imd.gov.in/responsive/marine_forecast.php', geometryPrecision: 'point',
+      }],
       sourceName: 'India Meteorological Department',
       sourceUrl: 'https://api.imd.gov.in/public/api_reference.html',
     };
+  }
+
+  it('imdCycloneMarine: parallel weather/natural loaders share one accepted snapshot (#8354)', async () => {
+    const snapshot = imdSnapshotFixture(Date.now());
     // Pre-seed the consume-once slot AFTER bootstrap hydration (which drains an
     // empty slow deferred with {}), mirroring a tier payload or a completed
     // on-demand read landing while both loaders are already queued.
@@ -457,15 +488,45 @@ describe('bootstrap hydration reuse (#7048)', () => {
       harness.fetchImdCycloneMarine(),
       harness.fetchImdCycloneMarine(),
     ]);
-    assert.equal(first.cycloneEvents.length, 1);
-    assert.equal(first.portAlerts.length, 1);
-    assert.equal(first.marineBulletins.length, 1);
+    assert.equal(first.coverageState, 'ok');
+    assert.deepEqual(first.cycloneEvents.map((event) => event.id), ['imd-BOB052026']);
+    assert.deepEqual(first.portAlerts.map((alert) => alert.id), ['imd-port-paradip-2026-09-22']);
+    assert.deepEqual(first.marineBulletins.map((alert) => alert.id), ['imd-sea-bay-central']);
+    // The accepted record went through main's mapper, not a raw passthrough.
+    assert.equal(first.portAlerts[0]?.severity, 'Severe');
+    assert.equal(first.portAlerts[0]?.issuedBy, 'ACWC KOLKATA');
+    assert.equal(first.portAlerts[0]?.sourceUrl, 'https://rsmcnewdelhi.imd.gov.in/port-warning.php');
+    assert.ok(first.portAlerts[0]?.onset instanceof Date);
+    assert.equal(first.marineBulletins[0]?.seaState, 'Rough');
+    assert.equal(first.cycloneEvents[0]?.sourceUrl, 'https://rsmcnewdelhi.imd.gov.in/');
     assert.deepEqual(second, first, 'both layers must share one accepted snapshot');
     assert.equal(rpcUrlCount(requests), 0, 'accepted hydration must not trigger an RPC refetch');
 
     const third = await harness.fetchImdCycloneMarine();
-    assert.deepEqual(third, first, 'the accepted snapshot is retained for the TTL window');
+    assert.deepEqual(third, first, 'the accepted snapshot is retained inside the handoff window');
     assert.equal(rpcUrlCount(requests), 0, 'retained hydration must not trigger a second fetch');
+  });
+
+  it('imdCycloneMarine: the shared snapshot expires after a short handoff window, not 30 minutes', async (t) => {
+    const requests = bootstrapStub({});
+    await harness.fetchBootstrapData();
+    harness.bootstrapTesting.resetBootstrapForTests();
+    const now = Date.now();
+    let clock = now;
+    t.mock.method(Date, 'now', () => clock);
+    harness.bootstrapTesting.seedHydrationCacheForTests({ imdCycloneMarine: imdSnapshotFixture(now) });
+
+    const accepted = await harness.fetchImdCycloneMarine();
+    assert.equal(accepted.portAlerts.length, 1);
+
+    // The handoff only bridges the two same-tick loaders. A later refresh
+    // must go back to the load path instead of replaying a snapshot for the
+    // breaker-length 30-minute default.
+    clock = now + 60_001;
+    const later = await harness.fetchImdCycloneMarine();
+    assert.equal(later.coverageState, 'unavailable');
+    assert.equal(later.portAlerts.length, 0);
+    assert.equal(rpcUrlCount(requests), 0);
   });
 
   it('malformed live DDoS and traffic responses use their fallbacks', async () => {

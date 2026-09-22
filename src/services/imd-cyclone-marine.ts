@@ -185,6 +185,9 @@ const hydrationHandoff = createHydrationHandoff<ImdMappedProducts>(
       ? null
       : mapped;
   },
+  // Only bridge the same-tick weather + natural loaders; a later refresh goes
+  // back to the load path instead of replaying one snapshot for 30 minutes.
+  { ttlMs: 60_000 },
 );
 
 export async function fetchImdCycloneMarine(): Promise<ImdMappedProducts> {
