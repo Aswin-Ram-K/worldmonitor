@@ -103,7 +103,15 @@ function blogPages() {
   });
 }
 
-const decode = (s) => s.replace(/&amp;/g, '&').replace(/&#39;|&#x27;/g, "'").replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&nbsp;/g, ' ');
+// Similarity text from our own generated HTML, never rendered: one decoding
+// pass, and `&lt;`/`&gt;` become spaces so no markup can reappear.
+const ENTITIES = { amp: '&', quot: '"', '#39': "'", '#x27': "'", nbsp: ' ', lt: ' ', gt: ' ' };
+const textOf = (html) => html
+  .replace(/<(script|style)\b[\s\S]*?<\/\1\s*>/gi, ' ')
+  .replace(/<[^>]*>/g, ' ')
+  .replace(/&(amp|quot|#39|#x27|nbsp|lt|gt);/g, (_, e) => ENTITIES[e])
+  .replace(/\s+/g, ' ')
+  .trim();
 
 function sitePages() {
   const manifestFile = join(ROOT, 'public/crawlable-corpus.json');
@@ -122,11 +130,10 @@ function sitePages() {
     const file = join(ROOT, 'public', route, 'index.html');
     if (!existsSync(file)) continue;
     const html = readFileSync(file, 'utf8');
-    const title = decode(html.match(/<title>([^<]*)<\/title>/)?.[1] ?? '').replace(/\s*[|–—]\s*World ?Monitor.*$/i, '').trim();
-    const about = decode(html.match(/<meta name="description" content="([^"]*)"/)?.[1] ?? '');
-    const h1 = decode((html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/)?.[1] ?? '').replace(/<[^>]+>/g, '')).trim();
-    const main = html.match(/<main[\s\S]*?<\/main>/)?.[0] ?? '';
-    const plain = decode(main.replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/g, ' ').replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ');
+    const title = textOf(html.match(/<title>([^<]*)<\/title>/)?.[1] ?? '').replace(/\s*[|–—]\s*World ?Monitor.*$/i, '').trim();
+    const about = textOf(html.match(/<meta name="description" content="([^"]*)"/)?.[1] ?? '');
+    const h1 = textOf(html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/)?.[1] ?? '');
+    const plain = textOf(html.match(/<main[\s\S]*?<\/main>/)?.[0] ?? '');
     if (title) out.push({ ...page({ url: `${SITE_ORIGIN}${route}`, kind: 'site', title: h1 || title, about, plain: plain.slice(0, 20000) }), h1, section: route.split('/')[1] });
   }
   // Every country page is titled "<Country> Country Instability Index": the

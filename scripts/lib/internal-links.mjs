@@ -122,7 +122,7 @@ export function parseMarkdown(text) {
       if (closer.test(raw)) closer = null;
       continue;
     }
-    if (/^<!--/.test(t) && !t.includes('-->')) closer = /-->/;
+    if (/^<!--/.test(t) && !/--!?>/.test(t)) closer = /--!?>/;
     else if (/^\{\/\*/.test(t) && !t.includes('*/}')) closer = /\*\/\}/;
     else if (/^<[A-Za-z]/.test(t) && !/>\s*$/.test(t) && !/>/.test(t.replace(/"[^"]*"|'[^']*'/g, ''))) closer = />/;
     for (const m of raw.matchAll(LINK)) if (!m[0].startsWith('!')) hrefs.push(m[2]);
