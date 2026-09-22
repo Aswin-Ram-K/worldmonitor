@@ -1013,6 +1013,7 @@ const EXCLUDED_HOSTS = new Set([
   'reddit.com',
   'openrouter.ai',
   'api.groq.com',
+  'api.typesafe.ai',
   'tts.baidu.com',
   'api.indexnow.org',
   'data.worldbank.org',
