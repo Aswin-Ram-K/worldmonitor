@@ -8,8 +8,9 @@ const APP_SOURCE = 'src/App.ts';
 const EN_LOCALE = 'src/locales/en.json';
 const EN_SHELL_LOCALE = 'src/locales/en.shell.json';
 const COMPONENTS_DIR = 'src/components';
-// Six quota entries add 343 bytes to 53,182; retain the strict bound with no spare byte.
-const SHELL_BUDGET_BYTES = 53_526;
+// Six quota entries add 343 bytes to main's 53,239-byte shell. The 52 KiB cap
+// had 9 bytes of spare, so the strict bound rises by 335 bytes to 53,583.
+const SHELL_BUDGET_BYTES = 53_583;
 
 function tsFilesUnder(dir) {
   return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
@@ -211,6 +212,7 @@ describe('English i18n shell split', () => {
     );
 
     const requiredPaths = [
+      'components.etfFlows.netNeutral',
       'shell',
       'header',
       'panels',

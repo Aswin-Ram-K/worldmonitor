@@ -50,6 +50,20 @@ function fixture() {
       getEntitlements: async () => ({ features: { tier: 1 } }),
       getBillingVerificationDenial: () => null,
     },
+    './_rate-limit.js': { checkRateLimit: async () => null },
+    './_relay.js': { getRelayHeaders: (headers = {}) => ({ ...headers }) },
+    '../server/_shared/rate-limit': {
+      ENDPOINT_RATE_POLICIES: { '/api/widget-agent': { limit: 20, window: '1 h' } },
+    },
+    '../server/_shared/redis': {
+      runRedisPipeline: async () => [{ result: 1 }, { result: 1 }],
+    },
+    '../server/_shared/direct-llm-quota': {
+      DIRECT_LLM_DAILY_QUOTA_LIMIT: 500,
+      DIRECT_LLM_UNVERIFIED_DAILY_QUOTA_LIMIT: 50,
+      reserveDirectLlmQuota: async () => ({ ok: true, newCount: 1, rollback: async () => {} }),
+      resolveActiveDirectLlmLimit: () => 50,
+    },
   };
   const source = ts.transpileModule(
     readFileSync(new URL('../api/widget-agent.ts', import.meta.url), 'utf8'),
@@ -77,6 +91,12 @@ function fixture() {
       return timer;
     },
     console,
+    crypto,
+    TextDecoder,
+    TextEncoder,
+    AbortController,
+    clearTimeout,
+    URL,
     fetch: (...args) => globalThis.fetch(...args),
   });
   const request = (headers = {}, method = 'POST') =>
@@ -96,12 +116,12 @@ test('all authenticated paths reserve using the verified credential or user, and
   for (const [headers, kind, id] of [
     [{ 'X-WorldMonitor-Key': 'tester-secret' }, 'key', 'tester-secret'],
     [{ 'X-Api-Key': 'tester-secret' }, 'key', 'tester-secret'],
-    [{ Cookie: 'wm-pro-key=tester-secret' }, 'key', 'tester-secret'],
-    [{ Cookie: 'wm-widget-key=tester-secret' }, 'key', 'tester-secret'],
+    [{ Cookie: '__Host-wm-pro-key=tester-secret' }, 'key', 'tester-secret'],
+    [{ Cookie: '__Host-wm-widget-key=tester-secret' }, 'key', 'tester-secret'],
     [{ 'X-Pro-Key': 'pro-secret' }, 'key', 'pro-secret'],
     [{ 'X-Widget-Key': 'basic-secret' }, 'key', 'basic-secret'],
-    [{ Cookie: 'wm-pro-key=pro-secret' }, 'key', 'pro-secret'],
-    [{ Cookie: 'wm-widget-key=basic-secret' }, 'key', 'basic-secret'],
+    [{ Cookie: '__Host-wm-pro-key=pro-secret' }, 'key', 'pro-secret'],
+    [{ Cookie: '__Host-wm-widget-key=basic-secret' }, 'key', 'basic-secret'],
     [{ Authorization: 'Bearer clerk-pro' }, 'user', 'clerk-pro'],
     [{ Authorization: 'Bearer clerk-entitled' }, 'user', 'clerk-entitled'],
   ]) {

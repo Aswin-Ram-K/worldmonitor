@@ -64,7 +64,7 @@ function fixture({ limit = 100000000, responses = [], corrupt = false } = {}) {
       res.end(body);
     },
     isWidgetInjectionAttempt: () => false,
-    parseWidgetAgentResponse: () => ({ html: '<p>ok</p>', title: 'OK' }),
+    parseWidgetAgentResponse: () => ({ html: '<p>ok</p>', title: 'OK', isComplete: true }),
     sanitizeToolContent: (s) => s,
     isWidgetEndpointAllowed: () => false,
     WIDGET_EXA_KEY: 'synthetic-exa-key',
@@ -189,7 +189,15 @@ test('signed users behind one IP retain separate budgets and allowed streams', a
 test('every tool-loop model turn reserves; exhaustion stops the next paid call', async () => {
   const f = fixture({
     limit: quota.WIDGET_MODEL_POLICY.pro.microUsd,
-    responses: [{ stop_reason: 'tool_use', content: [] }],
+    responses: [{
+      stop_reason: 'tool_use',
+      content: [{
+        type: 'tool_use',
+        id: 'fetch-1',
+        name: 'fetch_worldmonitor_data',
+        input: { endpoint: '/api/not-allowed', params: {} },
+      }],
+    }],
   });
   const res = await f.request();
   assert.equal(f.calls.length, 1);

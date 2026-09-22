@@ -1,5 +1,18 @@
 # Unmapped payment product investigation (#7900)
 
+## Checkout admission follow-up (2026-09-10)
+
+New checkouts now require an exact catalog product ID with both
+`currentForCheckout` and `selfServe` enabled. Both public and internal actions
+reject legacy aliases, Enterprise, unknown and malformed IDs before billing
+queries, Terms writes, signing or provider calls. The pending-payment bypass
+cannot skip this check. The relay and edge return `INVALID_CHECKOUT_PRODUCT`
+with HTTP 400.
+
+Legacy resolution and subscription processing are unchanged. The investigation
+below records the behavior before this admission fix; merchant reachability and
+the existing unknown-product webhook fallback remain separate questions.
+
 ## Result and evidence boundary
 
 **Fallback confirmed; buyer reachability blocked on merchant evidence.** This is

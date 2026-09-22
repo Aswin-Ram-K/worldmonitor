@@ -36,6 +36,7 @@ export const HUMAN_NOT_FOUND_LINKS = {
 export const AGENT_NOT_FOUND_PASSTHROUGH_PREFIXES = [
   '/a2a',
   '/about',
+  '/accuracy',
   '/agent',
   '/api-reference',
   '/ask',

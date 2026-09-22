@@ -226,6 +226,61 @@ describe('redis caching behavior', { concurrency: 1 }, () => {
     }
   });
 
+  it('coalesces concurrent misses after asynchronous admission', async () => {
+    const redis = await importRedisFresh();
+    const restoreEnv = withEnv({
+      UPSTASH_REDIS_REST_URL: 'https://redis.test',
+      UPSTASH_REDIS_REST_TOKEN: 'token',
+      VERCEL_ENV: undefined,
+      VERCEL_GIT_COMMIT_SHA: undefined,
+    });
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (url, init) => {
+      if (String(url).includes('/get/')) return jsonResponse({ result: undefined });
+      if (isSetRequest(url, init)) return jsonResponse({ result: 'OK' });
+      throw new Error(`Unexpected fetch URL: ${String(url)}`);
+    };
+
+    try {
+      let fetcherCalls = 0;
+      let admissionCalls = 0;
+      const admissionReached = Promise.withResolvers();
+      const admission = Promise.withResolvers();
+      const shouldFetch = async () => {
+        admissionCalls += 1;
+        if (admissionCalls === 3) admissionReached.resolve();
+        return admission.promise;
+      };
+      const fetcher = async () => {
+        fetcherCalls += 1;
+        return { value: 42 };
+      };
+
+      const results = [
+        redis.cachedFetchJsonWithMeta('webcam:test:admission', 60, fetcher, 120, { shouldFetch }),
+        redis.cachedFetchJsonWithMeta('webcam:test:admission', 60, fetcher, 120, { shouldFetch }),
+        redis.cachedFetchJsonWithMeta('webcam:test:admission', 60, fetcher, 120, { shouldFetch }),
+      ];
+      await admissionReached.promise;
+      admission.resolve(true);
+
+      const [a, b, c] = await Promise.all(results);
+      assert.equal(fetcherCalls, 1, 'admitted callers should share one upstream fetch');
+      assert.equal(a.leader, true);
+      assert.equal(b.leader, false);
+      assert.equal(c.leader, false);
+      assert.deepEqual(a.data, { value: 42 });
+      assert.deepEqual(b.data, { value: 42 });
+      assert.deepEqual(c.data, { value: 42 });
+      assert.equal(a.source, 'fresh');
+      assert.equal(b.source, 'fresh');
+      assert.equal(c.source, 'fresh');
+    } finally {
+      globalThis.fetch = originalFetch;
+      restoreEnv();
+    }
+  });
+
   it('does not positive-cache no-store fallback payloads', async () => {
     const redis = await importRedisFresh();
     const restoreEnv = withEnv({
@@ -397,7 +452,7 @@ describe('cachedFetchJsonWithMeta source labeling', { concurrency: 1 }, () => {
     }
   });
 
-  it('skips a gated cache miss without hiding positive cache hits or writing a sentinel', async () => {
+  it('awaits a gated cache miss without hiding positive cache hits or writing a sentinel', async () => {
     const redis = await importRedisFresh();
     const restoreEnv = withEnv({
       UPSTASH_REDIS_REST_URL: 'https://redis.test',
@@ -436,7 +491,7 @@ describe('cachedFetchJsonWithMeta source labeling', { concurrency: 1 }, () => {
         60,
         fetcher,
         120,
-        { shouldFetch: () => false },
+        { shouldFetch: async () => false },
       );
       assert.deepEqual(hit, {
         data: { value: 'cached-data' },
@@ -449,7 +504,7 @@ describe('cachedFetchJsonWithMeta source labeling', { concurrency: 1 }, () => {
         60,
         fetcher,
         120,
-        { shouldFetch: () => false },
+        { shouldFetch: async () => false },
       );
       assert.deepEqual(skipped, { data: null, source: 'skipped', leader: false });
       assert.equal(fetcherCalls, 0, 'the provider-local fetcher must remain gated');
@@ -2462,12 +2517,22 @@ describe('country intel brief caching behavior', { concurrency: 1 }, () => {
 
 describe('aviation aircraft provider priority', { concurrency: 1 }, () => {
   async function importTrackAircraft() {
-    return importPatchedTsModule('server/worldmonitor/aviation/v1/track-aircraft.ts', {
+    // Provider-priority tests isolate admission; aircraft-input-boundary tests
+    // exercise the real scoped limiter through the generated gateway.
+    const stubDir = createTempDir('wm-aircraft-rate-');
+    const rateStub = join(stubDir, 'rate.mjs');
+    writeFileSync(rateStub, `export const getClientIp = () => 'test';
+export const checkScopedRateLimit = async () => ({ allowed: true, degraded: false });
+export const RATE_LIMIT_DEGRADED_HEADERS = { 'X-RateLimit-Mode': 'degraded', 'Retry-After': '5' };`);
+    const imported = await importPatchedTsModule('server/worldmonitor/aviation/v1/track-aircraft.ts', {
       './_shared': resolve(root, 'server/_shared/relay.ts'),
       '../../../_shared/constants': resolve(root, 'server/_shared/constants.ts'),
       '../../../_shared/redis': resolve(root, 'server/_shared/redis.ts'),
+      '../../../_shared/hash': resolve(root, 'server/_shared/hash.ts'),
       '../../../_shared/provider-redistribution': resolve(root, 'server/_shared/provider-redistribution.ts'),
+      '../../../_shared/rate-limit': rateStub,
     });
+    return { module: imported.module, cleanup() { imported.cleanup(); removeTempDir(stubDir); } };
   }
 
   it('serves a bbox from Wingbits without spending an OpenSky request', async () => {
@@ -2500,7 +2565,7 @@ describe('aviation aircraft provider priority', { concurrency: 1 }, () => {
     };
 
     try {
-      const result = await module.trackAircraft({}, {
+      const result = await module.trackAircraft({ request: new Request('https://api.worldmonitor.app/api/aviation/v1/track-aircraft') }, {
         swLat: 10,
         swLon: 10,
         neLat: 11,
@@ -2548,13 +2613,13 @@ describe('aviation aircraft provider priority', { concurrency: 1 }, () => {
     };
 
     try {
-      const quiet = await module.trackAircraft({}, {
+      const quiet = await module.trackAircraft({ request: new Request('https://api.worldmonitor.app/api/aviation/v1/track-aircraft') }, {
         swLat: 10,
         swLon: 10,
         neLat: 11,
         neLon: 11,
       });
-      const recovered = await module.trackAircraft({}, {
+      const recovered = await module.trackAircraft({ request: new Request('https://api.worldmonitor.app/api/aviation/v1/track-aircraft') }, {
         swLat: 20,
         swLon: 20,
         neLat: 21,
@@ -2608,7 +2673,7 @@ describe('aviation aircraft provider priority', { concurrency: 1 }, () => {
     };
 
     try {
-      const result = await module.trackAircraft({}, {
+      const result = await module.trackAircraft({ request: new Request('https://api.worldmonitor.app/api/aviation/v1/track-aircraft') }, {
         icao24: '4b1805',
         swLat: 0,
         swLon: 0,
@@ -2652,7 +2717,7 @@ describe('aviation aircraft provider priority', { concurrency: 1 }, () => {
     };
 
     try {
-      const result = await module.trackAircraft({}, {
+      const result = await module.trackAircraft({ request: new Request('https://api.worldmonitor.app/api/aviation/v1/track-aircraft') }, {
         icao24: '4b1805',
         swLat: 0,
         swLon: 0,
@@ -2698,7 +2763,7 @@ describe('aviation aircraft provider priority', { concurrency: 1 }, () => {
     };
 
     try {
-      const result = await module.trackAircraft({}, {
+      const result = await module.trackAircraft({ request: new Request('https://api.worldmonitor.app/api/aviation/v1/track-aircraft') }, {
         icao24: '4b1805',
         swLat: 0,
         swLon: 0,
@@ -2781,13 +2846,13 @@ describe('aviation aircraft provider priority', { concurrency: 1 }, () => {
       const raw = String(url);
       if (raw.includes('/wingbits/track') && raw.includes('lamin=')) {
         wingbitsCalls += 1;
-        return jsonResponse({ positions: [{ icao24: 'abc', lat: 20.5, lon: 10.5 }], source: 'wingbits' }, true);
+        return jsonResponse({ positions: [{ icao24: 'abc', lat: 10, lon: 10.5 }], source: 'wingbits' }, true);
       }
       return jsonResponse({}, false);
     };
 
     try {
-      const result = await module.trackAircraft({}, {
+      const result = await module.trackAircraft({ request: new Request('https://api.worldmonitor.app/api/aviation/v1/track-aircraft') }, {
         icao24: '',
         callsign: '',
         swLat: 10,
@@ -2826,7 +2891,7 @@ describe('aviation aircraft provider priority', { concurrency: 1 }, () => {
     };
 
     try {
-      const result = await module.trackAircraft({}, {
+      const result = await module.trackAircraft({ request: new Request('https://api.worldmonitor.app/api/aviation/v1/track-aircraft') }, {
         swLat: 10,
         swLon: 10,
         neLat: 11,
@@ -4117,7 +4182,7 @@ describe('military flights bbox behavior', { concurrency: 1 }, () => {
       assert.equal(openskyCalls, 1, 'a snapshot miss must cache and reuse request-specific recovery');
       assert.deepEqual(
         providerCacheWrites,
-        ['military:flights:v1:10:10:11:11::'],
+        ['military:flights:v1:10:10:11:11'],
         'provider recovery must remain under the exact quantized bbox key',
       );
       assert.deepEqual(first.flights.map((flight) => flight.id), ['OUTSIDE-REGION']);
@@ -4180,7 +4245,7 @@ describe('military flights bbox behavior', { concurrency: 1 }, () => {
       assert.equal(openskyCalls, 2, 'each bbox must recover independently after a seed miss');
       assert.deepEqual(
         providerCacheWrites,
-        ['military:flights:v1:10:10:11:11::', 'military:flights:v1:40:-100:41:-99::'],
+        ['military:flights:v1:10:10:11:11', 'military:flights:v1:40:-100:41:-99'],
         'a bbox-independent key would poison the second viewport with the first recovery payload',
       );
     } finally {
@@ -4377,7 +4442,7 @@ describe('military flights bbox behavior', { concurrency: 1 }, () => {
     }
   });
 
-  it('filters before pagination and reuses one cached result across page sizes and cursors', async () => {
+  it('ignores public filter values while coalescing recovery cache entries across page sizes and cursors', async () => {
     const { module, cleanup } = await importListMilitaryFlights();
     const restoreEnv = withEnv({
       UPSTASH_REDIS_REST_URL: 'https://redis.test',
@@ -4424,23 +4489,52 @@ describe('military flights bbox behavior', { concurrency: 1 }, () => {
         ...request,
         pageSize: 2,
         cursor: '',
-        operator: '',
-        aircraftType: '',
+        operator: 'MILITARY_OPERATOR_USAF',
+        aircraftType: 'MILITARY_AIRCRAFT_TYPE_FIGHTER',
       });
       const second = await module.listMilitaryFlights(ctx, {
         ...request,
         pageSize: 1,
         cursor: first.pagination?.nextCursor ?? '',
-        operator: '',
-        aircraftType: '',
+        operator: 'MILITARY_OPERATOR_RAF',
+        aircraftType: 'MILITARY_AIRCRAFT_TYPE_TANKER',
+      });
+      const ignoredFilterReplay = await module.listMilitaryFlights(ctx, {
+        ...request,
+        pageSize: 2,
+        cursor: '',
+        operator: 'MILITARY_OPERATOR_NATO',
+        aircraftType: 'MILITARY_AIRCRAFT_TYPE_DRONE',
       });
 
       assert.deepEqual(first.flights.map((flight) => flight.id), ['FIRST', 'SECOND']);
       assert.deepEqual(first.pagination, { nextCursor: '2', totalCount: 3 });
       assert.deepEqual(second.flights.map((flight) => flight.id), ['THIRD']);
       assert.deepEqual(second.pagination, { nextCursor: '', totalCount: 3 });
-      assert.equal(openskyCalls, 1, 'page size and cursor must not create new upstream/cache results');
-      assert.equal(new Set(liveCacheKeys).size, 1, 'all pages must read the same unpaginated bbox cache key');
+      assert.deepEqual(
+        ignoredFilterReplay.flights.map((flight) => flight.id),
+        first.flights.map((flight) => flight.id),
+        'operator and aircraft type remain accepted public no-ops',
+      );
+      assert.deepEqual(ignoredFilterReplay.pagination, first.pagination);
+      assert.equal(openskyCalls, 1, 'ignored filter values, page size, and cursor must not create new upstream results');
+      assert.deepEqual(
+        [...new Set(liveCacheKeys)],
+        ['military:flights:v1:10:10:11:11'],
+        'all callers in one quantized bbox must share an unpaginated recovery cache key',
+      );
+
+      const apiResult = await module.listMilitaryFlights({
+        request: new Request('https://wm.test/api/military/v1/list-military-flights', {
+          headers: { 'X-Api-Key': 'wm_customer-key' },
+        }),
+      }, { ...request, operator: 'MILITARY_OPERATOR_RAF', aircraftType: 'MILITARY_AIRCRAFT_TYPE_TANKER' });
+      assert.deepEqual(apiResult, { flights: [], clusters: [], pagination: { nextCursor: '', totalCount: 0 } });
+      assert.equal(openskyCalls, 1, 'API callers must neither reuse nor refresh the browser OpenSky snapshot');
+      assert.deepEqual([...new Set(liveCacheKeys)], [
+        'military:flights:v1:10:10:11:11',
+        'military:flights:v1:10:10:11:11:redistributable',
+      ]);
     } finally {
       cleanup();
       globalThis.fetch = originalFetch;
@@ -5053,7 +5147,11 @@ describe('allowlisted Redis transactions', { concurrency: 1 }, () => {
       ]);
       const proxy = readFileSync(resolve(root, 'docker/redis-rest-proxy.mjs'), 'utf8');
       assert.match(proxy, /req\.url === '\/multi-exec'/);
-      assert.match(proxy, /'GET', 'SET', 'DEL'/);
+      const allowlist = proxy.match(/const ALLOWED_COMMANDS = new Set\(\[([\s\S]*?)\]\);/)?.[1] ?? '';
+      const commands = new Set([...allowlist.matchAll(/'([A-Z]+)'/g)].map((match) => match[1]));
+      for (const command of ['GET', 'GETDEL', 'SET', 'DEL']) {
+        assert.ok(commands.has(command), `${command} must be allowed by the Redis proxy`);
+      }
     } finally {
       globalThis.fetch = originalFetch;
       restoreEnv();

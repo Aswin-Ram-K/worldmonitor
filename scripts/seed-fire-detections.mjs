@@ -16,6 +16,8 @@ import {
   CWFIS_SNAPSHOT_KEY,
 } from './wildfire/cwfis-wfs.mjs';
 import {
+  BC_SNAPSHOT_KEY,
+  BC_SNAPSHOT_TTL_SECONDS,
   canadianWildfireAfterPublish,
   fetchBcFirePoints,
   hasCompleteWorldwideWildfireCoverage,
@@ -92,17 +94,20 @@ async function fetchMergedWildfires() {
       fetchFn: globalThis.fetch, cache,
       previousSnapshot: await readSeedSnapshot(CWFIS_SNAPSHOT_KEY),
     }),
-    fetchBcWildfire: () => fetchBcFirePoints({ fetchFn: globalThis.fetch, cache }),
+    fetchBcWildfire: async () => fetchBcFirePoints({
+      fetchFn: globalThis.fetch, cache,
+      previousSnapshot: await readSeedSnapshot(BC_SNAPSHOT_KEY, { strict: true }),
+    }),
   });
   if (data.fireDetections.length === 0) {
-    await persistCwfisSnapshot(data).catch(error => {
+    await persistSourceSnapshots(data).catch(error => {
       throw Object.assign(error, { nonRetryable: true });
     });
   }
   return data;
 }
 
-async function persistCwfisSnapshot(data) {
+async function persistSourceSnapshots(data) {
   const snapshot = data._cwfisSnapshot;
   if (!snapshot) throw new Error('CWFIS recovery snapshot is missing');
   await writeExtraKey(CWFIS_SNAPSHOT_KEY, snapshot, CWFIS_SNAPSHOT_TTL_SECONDS);
@@ -113,6 +118,17 @@ async function persistCwfisSnapshot(data) {
     sourceState: snapshot.consecutiveFailures ? 'degraded' : 'ok',
     sourceVersion: 'cwfis-recovery-v1',
   }, CWFIS_SNAPSHOT_TTL_SECONDS);
+  const bcSnapshot = data._bcSnapshot;
+  if (!bcSnapshot) throw new Error('BC recovery snapshot is missing');
+  await writeExtraKey(BC_SNAPSHOT_KEY, bcSnapshot, BC_SNAPSHOT_TTL_SECONDS);
+  await writeExtraKey('seed-meta:wildfire:bc-source', {
+    fetchedAt: bcSnapshot.fetchedAt,
+    recordCount: bcSnapshot.fireDetections.length,
+    lastAttemptAt: bcSnapshot.lastAttemptAt,
+    sourceState: bcSnapshot.errorCode ? 'degraded' : 'ok',
+    errorCode: bcSnapshot.errorCode,
+    sourceVersion: 'bc-fire-points-v1',
+  }, BC_SNAPSHOT_TTL_SECONDS);
 }
 
 async function main() {
@@ -149,10 +165,10 @@ async function main() {
     declareRecords,
     schemaVersion: 1,
     maxStaleMin: 360,
-    beforePublish: persistCwfisSnapshot,
+    beforePublish: persistSourceSnapshots,
     afterPublish: canadianWildfireAfterPublish,
     afterValidationSkip: async (data, { existingSeedMeta }) => {
-      await persistCwfisSnapshot(data);
+      await persistSourceSnapshots(data);
       return canadianWildfireAfterPublish(data, { previousMeta: existingSeedMeta });
     },
   });

@@ -7,6 +7,7 @@
 export const PREMIUM_RPC_PATHS = new Set<string>([
   '/api/market/v1/analyze-stock',
   '/api/market/v1/get-stock-analysis-history',
+  '/api/market/v1/get-insider-transactions',
   '/api/market/v1/backtest-stock',
   '/api/market/v1/list-stored-stock-backtests',
   // Physical-vs-paper metals: the SGE/COMEX premium series (#6436) and the
@@ -39,6 +40,7 @@ export const PREMIUM_RPC_PATHS = new Set<string>([
   // published security contract.
   '/api/intelligence/v1/get-country-coverage',
   '/api/intelligence/v1/list-market-implications',
+  '/api/intelligence/v1/list-wsb-tickers',
   '/api/intelligence/v1/get-regional-snapshot',
   '/api/intelligence/v1/get-regime-history',
   '/api/intelligence/v1/get-regional-brief',

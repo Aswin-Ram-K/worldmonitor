@@ -26,6 +26,11 @@ import {
   USE_CASES_CONTENT_VERSION,
   writeUseCasesSection,
 } from './build-use-cases.mjs';
+import {
+  ACCURACY_CONTENT_VERSION,
+  ACCURACY_PAGE_PATH,
+  writeAccuracySection,
+} from './build-accuracy-page.mjs';
 import { buildSourceCatalog, buildSourcePages, renderSourcesIndex, sourceCardAnchors } from './crawlable-sources-page.mjs';
 import { sourceOriginFilterValue } from './source-origin.mjs';
 import {
@@ -106,6 +111,21 @@ const OBSERVATION_PERIOD_RE = /^\d{4}-\d{2}(-\d{2})?$/;
 // either without the other reopens the gap, and a guard in
 // tests/crawlable-corpus.test.mjs asserts they still agree.
 export const MAX_LIVE_PULSE_SNAPSHOT_AGE_DAYS = 10;
+// The freeze ceiling above is a pipeline fuse. A page that still says
+// "approximately 24 hours" needs a tighter claim fuse: a three-day-old
+// reading is inside the 10-day bound and still a false recency claim (#8072,
+// recurrence of #7530). Keep this at 2 while any generated page uses the
+// 24-hour recency phrasing from livePulseMovementClaim().
+export const MAX_TWENTY_FOUR_HOUR_MOVEMENT_CLAIM_AGE_DAYS = 2;
+const CII_MOVEMENT_RECENCY_CLAIMS = Object.freeze([
+  'over approximately 24 hours',
+  'Approx. 24-hour movement',
+  'Approximate 24-hour movement',
+  'with 24-hour movement stable or unavailable',
+  'reports approximate 24-hour movement',
+  'available approximate 24-hour movement',
+  'available 24-hour movement',
+]);
 const COUNTRY_NAMES_PATH = 'shared/country-names.json';
 const COUNTRY_REGIONS_PATH = 'shared/iso2-to-region.json';
 const MICROSTATE_TERRITORIES_PATH = 'server/worldmonitor/resilience/v1/cohorts/microstate-territories.json';
@@ -149,12 +169,12 @@ export const COMPARISON_PAGE_LASTMOD_PATHS = Object.freeze([
 // families take the later of this version and their own committed source date,
 // so template changes are reflected without pretending every deploy is fresh.
 export const CORPUS_GENERATOR_CONTENT_VERSION = '2026-09-01';
-export const COUNTRY_PAGE_CONTENT_VERSION = '2026-09-10';
-export const CII_COUNTRY_PAGE_CONTENT_VERSION = '2026-09-03';
+export const COUNTRY_PAGE_CONTENT_VERSION = '2026-09-13';
+export const CII_COUNTRY_PAGE_CONTENT_VERSION = '2026-09-12';
 // Exported so the #7533 guard test can recompute every family clock without
 // re-implementing the version constants themselves.
 export const COUNTRIES_INDEX_CONTENT_VERSION = '2026-09-03';
-export const CII_RANKING_PAGE_CONTENT_VERSION = '2026-09-03';
+export const CII_RANKING_PAGE_CONTENT_VERSION = '2026-09-12';
 // Public ranking / confidence gates. Keep aligned with
 // server/worldmonitor/resilience/v1/_shared.ts and
 // docs/methodology/country-resilience-index.mdx.
@@ -208,6 +228,8 @@ const CHOKEPOINTS_INDEX_DATASET_DOWNLOAD = 'status.json';
 const CHOKEPOINT_DATASET_DOWNLOAD = 'reference.json';
 const CRISIS_DATASET_DOWNLOAD = 'tracker.json';
 const CONVERGENCE_DATASET_DOWNLOAD = 'reference.json';
+const ACCURACY_DATASET_DOWNLOAD = 'scorecard.json';
+const ACCURACY_PAGE_SOURCE_PATH = 'scripts/build-accuracy-page.mjs';
 const DATA_CATALOG_FRAGMENT = '#data-catalog';
 // Role filler for Dataset.creator / DataCatalog.publisher. The `@id` folds every
 // occurrence into the canonical Organization declared on welcome.html (#7459b),
@@ -322,6 +344,7 @@ export const GENERATED_DIRS = [
   'research',
   'sources',
   'use-cases',
+  'accuracy',
 ];
 
 const MONTHS = [
@@ -375,6 +398,63 @@ export function resolveLatestResilienceSnapshotPath(rootDir = DEFAULT_ROOT) {
   return relativePath;
 }
 
+export function livePulseSnapshotAgeDays(capturedAt, now = Date.now()) {
+  const capturedAtMs = Date.parse(`${String(capturedAt || '').slice(0, 10)}T00:00:00Z`);
+  return Number.isFinite(capturedAtMs)
+    ? (now - capturedAtMs) / 86_400_000
+    : Number.POSITIVE_INFINITY;
+}
+
+export function livePulseMovementClaim(ageDays) {
+  const recencyOk = Number.isFinite(ageDays)
+    && ageDays <= MAX_TWENTY_FOUR_HOUR_MOVEMENT_CLAIM_AGE_DAYS;
+  if (recencyOk) {
+    return {
+      recencyOk: true,
+      intervalPhrase: 'over approximately 24 hours',
+      metricLabel: 'Approx. 24-hour movement',
+      propertyName: 'Approximate 24-hour movement',
+      rankingReports: 'reports approximate 24-hour movement when available',
+      metaStable: 'with 24-hour movement stable or unavailable',
+      availableMovement: 'available 24-hour movement',
+      availableApproximateMovement: 'available approximate 24-hour movement',
+    };
+  }
+  return {
+    recencyOk: false,
+    intervalPhrase: 'over a 24-hour comparison window',
+    metricLabel: '24-hour comparison-window movement',
+    propertyName: '24-hour comparison-window movement',
+    rankingReports: 'reports 24-hour comparison-window movement when available',
+    metaStable: 'with 24-hour comparison-window movement stable or unavailable',
+    availableMovement: 'available 24-hour comparison-window movement',
+    availableApproximateMovement: 'available 24-hour comparison-window movement',
+  };
+}
+
+export function livePulseMovementClaimLastmod(capturedAt, now = Date.now()) {
+  const ageDays = livePulseSnapshotAgeDays(capturedAt, now);
+  if (!(ageDays > MAX_TWENTY_FOUR_HOUR_MOVEMENT_CLAIM_AGE_DAYS)) return null;
+  const capturedAtMs = Date.parse(`${String(capturedAt || '').slice(0, 10)}T00:00:00Z`);
+  if (!Number.isFinite(capturedAtMs)) return null;
+  return new Date(
+    capturedAtMs + MAX_TWENTY_FOUR_HOUR_MOVEMENT_CLAIM_AGE_DAYS * 86_400_000,
+  ).toISOString().slice(0, 10);
+}
+
+export function assertLivePulseMovementClaim(html, { pagePath, ageDays }) {
+  if (!(ageDays > MAX_TWENTY_FOUR_HOUR_MOVEMENT_CLAIM_AGE_DAYS)) return;
+  const haystack = String(html || '');
+  for (const claim of CII_MOVEMENT_RECENCY_CLAIMS) {
+    if (haystack.includes(claim)) {
+      throw new Error(
+        `${pagePath} claims "${claim}" against a ${Math.round(ageDays)}-day-old live-pulse snapshot; `
+        + 'derive the movement phrase from snapshot age or freeze a current pulse',
+      );
+    }
+  }
+}
+
 export function resolveLatestLivePulseSnapshotPath(rootDir = DEFAULT_ROOT) {
   const snapshotDir = repoPath(rootDir, RESILIENCE_SNAPSHOT_DIR);
   const candidates = readdirSync(snapshotDir)
@@ -396,10 +476,7 @@ export function resolveLatestLivePulseSnapshotPath(rootDir = DEFAULT_ROOT) {
   if (!snapshot.countries || !snapshot.chokepoints || !snapshot.crises || !snapshot.signalConvergence) {
     throw new Error(`${relativePath} is missing required live-pulse sections`);
   }
-  const capturedAtMs = Date.parse(`${snapshot.capturedAt}T00:00:00Z`);
-  const ageDays = Number.isFinite(capturedAtMs)
-    ? (Date.now() - capturedAtMs) / 86_400_000
-    : Number.POSITIVE_INFINITY;
+  const ageDays = livePulseSnapshotAgeDays(snapshot.capturedAt);
   if (ageDays > MAX_LIVE_PULSE_SNAPSHOT_AGE_DAYS) {
     throw new Error(
       `${relativePath} is ${Math.round(ageDays)} days old (max ${MAX_LIVE_PULSE_SNAPSHOT_AGE_DAYS}); `
@@ -436,10 +513,12 @@ function pulseDateOnly(asOf, fallback) {
   return fallback;
 }
 
-export function buildCiiRankingEntries(countries, livePulse) {
+export function buildCiiRankingEntries(countries, livePulse, { now = Date.now() } = {}) {
   const countryByCode = new Map(countries.map((country) => [country.code, country]));
   const methodologyVersions = new Set();
   const entries = [];
+  const ageDays = livePulseSnapshotAgeDays(livePulse?.capturedAt, now);
+  const movementClaim = livePulseMovementClaim(ageDays);
 
   for (const [code, pulse] of Object.entries(livePulse?.countries || {})) {
     if (pulse?.partial === true || pulse?.score == null || pulse.score === '') continue;
@@ -465,7 +544,9 @@ export function buildCiiRankingEntries(countries, livePulse) {
       trend: String(pulse.trend || '').trim(),
       asOf,
       methodologyVersion,
-      ...parseCiiMovement(pulse.trend),
+      ageDays,
+      movementClaim,
+      ...parseCiiMovement(pulse.trend, { intervalPhrase: movementClaim.intervalPhrase }),
     });
   }
 
@@ -491,6 +572,8 @@ export function buildCiiRankingEntries(countries, livePulse) {
       (latest, entry) => Date.parse(entry.asOf) > Date.parse(latest) ? entry.asOf : latest,
       entries[0].asOf,
     ),
+    ageDays,
+    movementClaim,
   };
 }
 
@@ -861,7 +944,9 @@ function countrySpatialCoverage(country, bbox) {
   };
   if (Array.isArray(bbox) && bbox.length === 4 && bbox.every((value) => Number.isFinite(Number(value)))) {
     const [south, west, north, east] = bbox.map(Number);
-    place.geo = geoShapeBox(south, west, north, east);
+    place.geo = west > east
+      ? [geoShapeBox(south, west, north, 180), geoShapeBox(south, -180, north, east)]
+      : geoShapeBox(south, west, north, east);
   }
   return place;
 }
@@ -1107,7 +1192,7 @@ export function countryMetaDescription({
 }) {
   if (ciiEntry) {
     const movementFact = ciiEntry.change24h == null
-      ? 'with 24-hour movement stable or unavailable'
+      ? (ciiEntry.movementClaim ?? livePulseMovementClaim(0)).metaStable
       : `and is ${ciiEntry.movementText}`;
     const subjects = [
       `${name} Country Instability Index`,
@@ -1669,7 +1754,11 @@ export function gitFileLastmod(rootDir, relativePath) {
 // keep the resolver's shape contract (required sections, filename↔capturedAt
 // coherence) but skip its 10-day staleness fuse — that fuse is what tests
 // legitimately need to bypass.
-export async function loadCorpusData({ rootDir = DEFAULT_ROOT, livePulseSnapshotPath } = {}) {
+export async function loadCorpusData({
+  rootDir = DEFAULT_ROOT,
+  livePulseSnapshotPath,
+  now = Date.now(),
+} = {}) {
   const resilienceSnapshotPath = resolveLatestResilienceSnapshotPath(rootDir);
   const pulsePath = livePulseSnapshotPath ?? resolveLatestLivePulseSnapshotPath(rootDir);
   const resilience = readJson(rootDir, resilienceSnapshotPath);
@@ -1747,7 +1836,7 @@ export async function loadCorpusData({ rootDir = DEFAULT_ROOT, livePulseSnapshot
       });
     }
   }
-  const ciiRanking = buildCiiRankingEntries(countries, livePulse);
+  const ciiRanking = buildCiiRankingEntries(countries, livePulse, { now });
   const countryBounds = normalizeCountryBounds(countryBboxes, countries, reverseNames);
   const chokepoints = normalizeChokepoints(CHOKEPOINT_REGISTRY);
   const tradeRoutesById = new Map(
@@ -1766,6 +1855,7 @@ export async function loadCorpusData({ rootDir = DEFAULT_ROOT, livePulseSnapshot
   const countriesLastmod = laterDate(
     resilience.capturedAt,
     livePulse.capturedAt,
+    livePulseMovementClaimLastmod(livePulse.capturedAt, now),
     gitFileLastmod(rootDir, COUNTRY_REGIONS_PATH),
     gitFileLastmod(rootDir, MICROSTATE_TERRITORIES_PATH),
     COUNTRY_PAGE_CONTENT_VERSION,
@@ -1812,6 +1902,13 @@ export async function loadCorpusData({ rootDir = DEFAULT_ROOT, livePulseSnapshot
   const useCasesLastmod = laterDate(
     USE_CASES_CONTENT_VERSION,
     gitFileLastmod(rootDir, 'scripts/build-use-cases.mjs'),
+  );
+  // The pulse folds in because the scorecard the page publishes is captured by
+  // the same freeze: a new capture changes every number on the page.
+  const accuracyLastmod = laterDate(
+    ACCURACY_CONTENT_VERSION,
+    gitFileLastmod(rootDir, ACCURACY_PAGE_SOURCE_PATH),
+    livePulse.capturedAt,
   );
   const comparisonsLastmod = comparisonPageLastmod({
     contentVersion: COMPARISONS_CONTENT_VERSION,
@@ -1861,6 +1958,7 @@ export async function loadCorpusData({ rootDir = DEFAULT_ROOT, livePulseSnapshot
       crisisRegistry: CRISIS_REGISTRY_PATH,
       researchReports: RESEARCH_REPORTS_INDEX_PATH,
       useCases: 'scripts/build-use-cases.mjs',
+      accuracy: ACCURACY_PAGE_SOURCE_PATH,
       comparisons: 'scripts/build-comparison-pages.mjs',
       sourceAttributionManifest: SOURCE_ATTRIBUTION_MANIFEST_PATH,
       sourcePageRenderer: SOURCE_PAGE_RENDERER_PATH,
@@ -1880,6 +1978,7 @@ export async function loadCorpusData({ rootDir = DEFAULT_ROOT, livePulseSnapshot
       crises: crisesLastmod,
       research: researchLastmod,
       useCases: useCasesLastmod,
+      accuracy: accuracyLastmod,
       comparisons: comparisonsLastmod,
       sources: sourcesLastmod,
     },
@@ -2056,6 +2155,7 @@ function pageDocument({
         <a href="/crises/">Crises</a>
         <a href="/tools/">Live tools</a>
         <a href="/research/">Research</a>
+        <a href="/accuracy/">Accuracy</a>
         <a href="/use-cases/">Use cases</a>
         <a href="/reference/changelog/">Changelog</a>
         <a href="/blog/glossary/">Glossary</a>`;
@@ -2188,10 +2288,10 @@ ${body}
 `;
 }
 
-function ciiMovementProperties(change24h) {
+function ciiMovementProperties(change24h, propertyName) {
   return change24h == null ? [] : [{
     '@type': 'PropertyValue',
-    name: 'Approximate 24-hour movement',
+    name: propertyName,
     value: change24h,
     unitText: 'index points',
   }];
@@ -2205,7 +2305,9 @@ function renderCountryInstabilityIndexPage({
   snapshotPath,
 }) {
   const path = '/country-instability-index/';
-  const description = `See World Monitor's live Country Instability Index rankings, with current scores, available 24-hour movement, severity levels, and update times for ${ciiRanking.entries.length} Tier-1 countries.`;
+  const movementClaim = ciiRanking.movementClaim
+    ?? livePulseMovementClaim(livePulseSnapshotAgeDays(capturedAt));
+  const description = `See World Monitor's live Country Instability Index rankings, with current scores, ${movementClaim.availableMovement}, severity levels, and update times for ${ciiRanking.entries.length} Tier-1 countries.`;
   const datasetId = `${absoluteUrl(baseUrl, path)}#dataset`;
   const rankingId = `${absoluteUrl(baseUrl, path)}#ranking`;
   const versionLabel = `CII ${ciiRanking.methodologyVersion}`;
@@ -2226,7 +2328,7 @@ function renderCountryInstabilityIndexPage({
         url,
         additionalProperty: [
           { '@type': 'PropertyValue', name: 'Country Instability Index score', value: entry.score, minValue: 0, maxValue: 100 },
-          ...ciiMovementProperties(entry.change24h),
+          ...ciiMovementProperties(entry.change24h, movementClaim.propertyName),
           { '@type': 'PropertyValue', name: 'Instability level', value: entry.band },
         ],
       },
@@ -2234,7 +2336,7 @@ function renderCountryInstabilityIndexPage({
   });
   const body = `      <p class="eyebrow">Current country stress</p>
       <h1>Country Instability Index</h1>
-      <p class="lede">The World Monitor Country Instability Index (CII) measures current country-level stress on a 0-100 scale using conflict, unrest, security and information signals. ${escapeHtml(versionLabel)} currently monitors ${ciiRanking.entries.length} countries and reports approximate 24-hour movement when available.</p>
+      <p class="lede">The World Monitor Country Instability Index (CII) measures current country-level stress on a 0-100 scale using conflict, unrest, security and information signals. ${escapeHtml(versionLabel)} currently monitors ${ciiRanking.entries.length} countries and ${escapeHtml(movementClaim.rankingReports)}.</p>
       <h2>${escapeHtml(rankingFaq.question)}</h2>
       <p>${escapeHtml(rankingFaq.answer)}</p>
       <section class="live-tool" data-live-cii-ranking data-cii-methodology-version="${escapeHtml(ciiRanking.methodologyVersion)}" data-state="ready" data-published-pulse>
@@ -2261,9 +2363,10 @@ ${ciiRanking.entries.map((entry) => `            <tr data-cii-country="${escapeH
       <h2>What the CII measures</h2>
       <p>CII combines a 40% structural baseline with 60% live event pressure. The event score weights conflict at 30%, unrest at 25%, information at 25%, and security at 20%. It also applies bounded boosts and conflict or advisory floors. Read the <a href="/docs/methodology/cii-risk-scores">CII ${escapeHtml(ciiRanking.methodologyVersion)} methodology</a> before using a score in an analysis.</p>
       <p>CII measures short-term stress. The separate <a href="/countries/">Country Resilience Index</a> measures longer-term structural capacity across 196 countries. Do not combine the scores.</p>
+      <p>CII is a current-conditions score, not a forecast. Where World Monitor does forecast, the graded record is published on the <a href="/accuracy/">forecast accuracy scorecard</a> with its Brier scores, calibration and sample sizes.</p>
       <a class="cta" href="${escapeHtml(withUtmSource(absoluteUrl(baseUrl, '/dashboard'), 'seo-cii'))}">Open the live CII panel in World Monitor →</a>
       <p class="source">Source: ${escapeHtml(snapshotPath)}. Published ${escapeHtml(prettyDate(capturedAt))}. Current results: <code>/api/intelligence/v1/get-risk-scores</code>.</p>`;
-  return pageDocument({
+  const html = pageDocument({
     baseUrl,
     path,
     title: 'Country Instability Index: Live Rankings | World Monitor',
@@ -2285,7 +2388,7 @@ ${ciiRanking.entries.map((entry) => `            <tr data-cii-country="${escapeH
         '@type': 'Dataset',
         '@id': datasetId,
         name: `World Monitor Country Instability Index (CII) ${ciiRanking.methodologyVersion}`,
-        description: `Current 0-100 instability scores, available approximate 24-hour movement, and instability levels for ${ciiRanking.entries.length} monitored countries.`,
+        description: `Current 0-100 instability scores, ${movementClaim.availableApproximateMovement}, and instability levels for ${ciiRanking.entries.length} monitored countries.`,
         url: absoluteUrl(baseUrl, path),
         identifier: `world-monitor-cii-${ciiRanking.methodologyVersion}`,
         keywords: ['country instability', 'country risk', 'instability index', 'geopolitical risk'],
@@ -2300,7 +2403,7 @@ ${ciiRanking.entries.map((entry) => `            <tr data-cii-country="${escapeH
         measurementTechnique: `World Monitor CII ${ciiRanking.methodologyVersion}`,
         variableMeasured: [
           { '@type': 'PropertyValue', name: 'Instability score', minValue: 0, maxValue: 100, unitText: 'index points' },
-          { '@type': 'PropertyValue', name: 'Approximate 24-hour movement', unitText: 'index points' },
+          { '@type': 'PropertyValue', name: movementClaim.propertyName, unitText: 'index points' },
           { '@type': 'PropertyValue', name: 'Instability level' },
         ],
         distribution: [dataDownload(absoluteUrl(baseUrl, datasetDownloadHref(path, CII_INDEX_DATASET_DOWNLOAD)))],
@@ -2324,6 +2427,11 @@ ${ciiRanking.entries.map((entry) => `            <tr data-cii-country="${escapeH
     body,
     scriptSrcs: ['/tools/live-tools.js'],
   });
+  assertLivePulseMovementClaim(html, {
+    pagePath: path,
+    ageDays: ciiRanking.ageDays ?? livePulseSnapshotAgeDays(capturedAt),
+  });
+  return html;
 }
 
 function renderCountriesIndex({ countries, ciiRanking, baseUrl, capturedAt, lastmod, snapshotPath }) {
@@ -3588,8 +3696,11 @@ export function renderCountryPage({
   bbox = null,
   livePulse = null,
   ciiEntry = null,
+  now = Date.now(),
 }) {
   const path = `/countries/${country.slug}/`;
+  const ageDays = ciiEntry?.ageDays ?? livePulseSnapshotAgeDays(livePulse?.capturedAt, now);
+  const movementClaim = ciiEntry?.movementClaim ?? livePulseMovementClaim(ageDays);
   const description = countryMetaDescription({
     name: country.name,
     rank: country.rank,
@@ -3598,7 +3709,7 @@ export function renderCountryPage({
     ciiEntry,
   });
   const mapUrl = withUtmSource(
-    absoluteUrl(baseUrl, `/?country=${encodeURIComponent(country.code)}&expanded=1`),
+    absoluteUrl(baseUrl, `/dashboard?country=${encodeURIComponent(country.code)}&expanded=1`),
     'seo-country',
   );
   const analysis = renderCountryAnalysis({
@@ -3631,14 +3742,14 @@ export function renderCountryPage({
   const liveGrid = hasPulse
     ? `        <div class="grid" data-live-grid aria-label="Current country instability metrics" aria-busy="false">
           <div class="metric"><span>Instability score</span><strong><span data-live-score>${escapeHtml(formatScore(pulse.score, { coverage: pulse.partial !== true }))}</span><small data-live-band>${pulse.partial ? 'No current score' : escapeHtml(pulse.band)}</small></strong></div>
-          <div class="metric"><span>Approx. 24-hour movement</span><strong data-live-trend>${escapeHtml(pulse.partial ? 'Unavailable' : ciiEntry?.change24h === null ? 'Stable or unavailable' : pulse.trend)}</strong></div>
+          <div class="metric"><span>${escapeHtml(movementClaim.metricLabel)}</span><strong data-live-trend>${escapeHtml(pulse.partial ? 'Unavailable' : ciiEntry?.change24h === null ? 'Stable or unavailable' : pulse.trend)}</strong></div>
           <div class="metric"><span>Travel advisory input</span><strong data-live-advisory>${escapeHtml(pulse.advisory)}</strong></div>
           <div class="metric"><span>OFAC designations in feed</span><strong data-live-sanctions>${escapeHtml(pulse.sanctions)}</strong></div>
         </div>`
     : `        <p class="tool-note" data-live-fallback>Current instability metrics load after page enhancement. The structural resilience snapshot below remains the dated crawlable reference.</p>
         <div class="grid" data-live-grid hidden aria-label="Current country instability metrics" aria-busy="true">
           <div class="metric"><span>Instability score</span><strong><span data-live-score></span><small data-live-band></small></strong></div>
-          <div class="metric"><span>Approx. 24-hour movement</span><strong data-live-trend></strong></div>
+          <div class="metric"><span>${escapeHtml(movementClaim.metricLabel)}</span><strong data-live-trend></strong></div>
           <div class="metric"><span>Travel advisory input</span><strong data-live-advisory></strong></div>
           <div class="metric"><span>OFAC designations in feed</span><strong data-live-sanctions></strong></div>
         </div>`;
@@ -3683,10 +3794,10 @@ ${renderCountryDevelopments({ countryCode: country.code, countryName: country.na
 ${analysis.html}
 ${renderRelatedChokepoints(relatedChokepoints)}
 ${analysis.readingGuide ? `      <h2>How to use this evidence</h2>
-      <p>${escapeHtml(analysis.readingGuide)} <a href="/docs/methodology/country-resilience-index">Full CRI method</a> · <a href="/docs/corrections">revision log</a>.</p>` : `      <h2>How to read this page</h2>
+      <p>${escapeHtml(analysis.readingGuide)} <a href="/docs/methodology/country-resilience-index">Full CRI method</a> · <a href="/docs/corrections">revision log</a> · <a href="/accuracy/">forecast accuracy scorecard</a>.</p>` : `      <h2>How to read this page</h2>
       <p>The 0-100 index records the ${escapeHtml(prettyDate(capturedAt))} snapshot under ${escapeHtml(methodologyFormula)}. See the <a href="/docs/methodology/country-resilience-index">Country Resilience Index methodology</a> for dimensions, sources and confidence rules. Published revisions that affect ${escapeHtml(country.name)} are in the <a href="/docs/corrections">corrections log</a>.</p>
       <p class="snapshot-note">${escapeHtml(snapshotNote)}</p>
-      <p>Use this dated reference with the live map for active alerts, conflict, market and energy signals.</p>`}
+      <p>Use this dated reference with the live map for active alerts, conflict, market and energy signals. Neither score on this page is a forecast; where World Monitor does forecast, the graded record is on the <a href="/accuracy/">forecast accuracy scorecard</a>.</p>`}
       <p class="source">Download: <a href="${escapeHtml(datasetDownloadHref(path, COUNTRY_DATASET_DOWNLOAD))}">${COUNTRY_DATASET_DOWNLOAD}</a>. Source: ${escapeHtml(snapshotPath)}. Captured ${escapeHtml(capturedAt)}. Methodology: <a href="/docs/methodology/country-resilience-index">Country Resilience Index</a>.</p>`;
   const coreTitle = ciiEntry
     ? `${country.name} Instability Index & Country Risk`
@@ -3751,7 +3862,7 @@ ${analysis.readingGuide ? `      <h2>How to use this evidence</h2>
     '@type': 'Dataset',
     '@id': ciiDatasetId,
     name: `World Monitor Country Instability Index: ${country.name}`,
-    description: `The current World Monitor Country Instability Index score, available approximate 24-hour movement, instability level, and methodology version for ${country.name}.`,
+    description: `The current World Monitor Country Instability Index score, ${movementClaim.availableApproximateMovement}, instability level, and methodology version for ${country.name}.`,
     url: absoluteUrl(baseUrl, path),
     identifier: `${country.code}-cii-${ciiEntry.methodologyVersion}`,
     keywords: ['country instability', country.name, 'instability index', 'country risk'],
@@ -3767,7 +3878,7 @@ ${analysis.readingGuide ? `      <h2>How to use this evidence</h2>
     measurementTechnique: `World Monitor CII ${ciiEntry.methodologyVersion}`,
     variableMeasured: [
       { '@type': 'PropertyValue', name: 'Instability score', value: ciiEntry.score, minValue: 0, maxValue: 100 },
-      ...ciiMovementProperties(ciiEntry.change24h),
+      ...ciiMovementProperties(ciiEntry.change24h, movementClaim.propertyName),
       { '@type': 'PropertyValue', name: 'Instability level', value: ciiEntry.band },
     ],
   } : null;
@@ -3814,6 +3925,7 @@ ${analysis.readingGuide ? `      <h2>How to use this evidence</h2>
   });
   assertCountryDevelopmentsRendered({ pagePath: path, html, developments, countryCode: country.code, countryName: country.name });
   assertCountryBriefPresentation({ pagePath: path, html, sources: developments?.brief?.sources || [] });
+  assertLivePulseMovementClaim(html, { pagePath: path, ageDays });
   return html;
 }
 
@@ -4185,7 +4297,7 @@ function renderChokepointPage({
     || `${chokepoint.displayName} is one of the 13 canonical maritime chokepoints tracked by World Monitor.`;
   const description = chokepointMetaDescription(chokepoint.displayName);
   const mapUrl = withUtmSource(
-    absoluteUrl(baseUrl, `/?chokepoint=${encodeURIComponent(chokepoint.id)}`),
+    absoluteUrl(baseUrl, `/dashboard?chokepoint=${encodeURIComponent(chokepoint.id)}`),
     'seo-chokepoint',
   );
 
@@ -4602,7 +4714,7 @@ ${snapshotSection}
       <p>${escapeHtml(crisis.coverage.map((country) => `${country.name} (${country.code})`).join(', '))}. Events outside this list are not included in the live totals on this page.</p>
 ${renderRelatedChokepoints(relatedChokepoints)}
       <h2>How to read this tracker</h2>
-      <p>Use these monthly country summaries as a bounded pulse, then inspect the dashboard for event-level context, map layers, and other independent signals. The figures are not forecasts and should not be interpreted as a complete casualty or incident ledger.</p>
+      <p>Use these monthly country summaries as a bounded pulse, then inspect the dashboard for event-level context, map layers, and other independent signals. The figures are not forecasts and should not be interpreted as a complete casualty or incident ledger. World Monitor's forecasts are graded separately, and that record is published on the <a href="/accuracy/">forecast accuracy scorecard</a>.</p>
       <p class="source">Download: <a href="${escapeHtml(datasetDownloadHref(path, CRISIS_DATASET_DOWNLOAD))}">${CRISIS_DATASET_DOWNLOAD}</a>. Scope source: <a href="${CRISIS_REGISTRY_URL}">${CRISIS_REGISTRY_PATH}</a>. Maintained metrics: HAPI/HDX humanitarian conflict summaries from the UN OCHA <a href="https://data.humdata.org/hapi">Humanitarian API</a>.</p>`;
   const coveragePlaces = crisis.coverage.map((country) => ({
     '@type': 'Country',
@@ -4976,7 +5088,7 @@ ${countrySelectOptions(countryBounds, { defaultCode: 'JP' })}
         <p class="tool-note">Military results are capped at 100 returned observations for the selected box. Countries with oversized or discontinuous envelopes are omitted so the tool never issues a continent-scale observation query. An empty or failed military response is unavailable, not confirmed zero activity.</p>
         <noscript><p>Enable JavaScript to check the selected country. The independent-source methodology and limitations remain available on this page.</p></noscript>
       </section>
-      <a class="cta" data-dashboard-link href="${escapeHtml(withUtmSource(absoluteUrl(baseUrl, '/?country=JP&expanded=1'), 'seo-tool'))}">Investigate the selected country in World Monitor →</a>
+      <a class="cta" data-dashboard-link href="${escapeHtml(withUtmSource(absoluteUrl(baseUrl, '/dashboard?country=JP&expanded=1'), 'seo-tool'))}">Investigate the selected country in World Monitor →</a>
       <h2>How to read the result</h2>
       <p>“Normal” applies only to monitored airports with current source coverage. “Unknown” means telemetry was not available and is not counted as normal. Military-flight results are bounded observations from OpenSky/Wingbits-compatible ingestion and are not exhaustive.</p>
       <p class="source">Geographic filters: ${COUNTRY_BBOXES_PATH}. Live metrics: <code>/api/aviation/v1/list-airport-delays</code> and <code>/api/military/v1/list-military-flights</code>.</p>`;
@@ -5147,6 +5259,12 @@ function buildManifest({ data, baseUrl, changelogPageCount }) {
         index: '/use-cases/',
         routes: USE_CASE_PAGES.map((page) => page.path),
       },
+      accuracy: {
+        count: 1,
+        index: ACCURACY_PAGE_PATH,
+        routes: [],
+        sourceCapturedAt: data.livePulse.capturedAt,
+      },
       comparisons: {
         count: COMPARISON_PAGES.length + 1,
         index: '/compare/',
@@ -5173,8 +5291,9 @@ export async function buildCorpus({
   baseUrl = DEFAULT_BASE_URL,
   clean = true,
   livePulseSnapshotPath,
+  now = Date.now(),
 } = {}) {
-  const data = await loadCorpusData({ rootDir, livePulseSnapshotPath });
+  const data = await loadCorpusData({ rootDir, livePulseSnapshotPath, now });
   const countrySlugByCode = new Map(data.countries.map((country) => [country.code, country.slug]));
   const chokepointPageLinks = buildChokepointPageLinks({
     ...data,
@@ -5307,6 +5426,7 @@ export async function buildCorpus({
         bbox: data.countryBboxByCode.get(country.code) || null,
         livePulse: data.livePulse,
         ciiEntry,
+        now,
       }),
     );
     if (ciiEntry) {
@@ -5419,6 +5539,25 @@ export async function buildCorpus({
     baseUrl,
     lastmod: data.lastmod.useCases,
     tpl: { escapeHtml, absoluteUrl, breadcrumbLd, withUtmSource, pageDocument },
+  });
+
+  writeAccuracySection({
+    outDir,
+    baseUrl,
+    lastmod: data.lastmod.accuracy,
+    tpl: { escapeHtml, absoluteUrl, breadcrumbLd, withUtmSource, pageDocument },
+    section: data.livePulse.forecastScorecard ?? null,
+    snapshotPath: data.sources.livePulseSnapshot,
+    dataCatalog: dataCatalogLd(baseUrl),
+    dataset: {
+      filename: ACCURACY_DATASET_DOWNLOAD,
+      href: datasetDownloadHref(ACCURACY_PAGE_PATH, ACCURACY_DATASET_DOWNLOAD),
+      file: datasetDownloadFile(ACCURACY_PAGE_PATH, ACCURACY_DATASET_DOWNLOAD),
+      download: dataDownload(
+        absoluteUrl(baseUrl, datasetDownloadHref(ACCURACY_PAGE_PATH, ACCURACY_DATASET_DOWNLOAD)),
+      ),
+      catalog: includedInDataCatalog(baseUrl),
+    },
   });
 
   writeComparisonPages({

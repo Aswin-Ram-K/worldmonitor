@@ -69,5 +69,8 @@
     "/countries/oman/",
     "/crises/hormuz-gulf-security/",
     "/crises/iran-israel-escalation/"
+  ],
+  "ai-forecast-accuracy-brier-scorecard-worldmonitor": [
+    "/accuracy/"
   ]
 }

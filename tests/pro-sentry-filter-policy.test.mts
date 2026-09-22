@@ -91,6 +91,46 @@ function event(value: string, filenames: string[] = []): PolicyEvent {
   };
 }
 
+/**
+ * The checkout catch on this surface reports with an ownership tag
+ * (`kind: 'checkout_request_failed'`). A tag can only be honoured by a filter
+ * that runs late enough to read it: `ignoreErrors` is applied as an SDK event
+ * processor inside `prepareEvent`, before `marketingBeforeSend` and blind to
+ * both tags and frames, so a network-worded entry there silently discards an
+ * owned checkout failure. The retry widening shipped to this bundle makes those
+ * exact wordings more reachable, so the suppression has to move late enough to
+ * see the tag (WORLDMONITOR-Q4).
+ */
+describe('marketingBeforeSend — owned network failures survive (WORLDMONITOR-Q4)', () => {
+  const CHECKOUT_TAGS = {
+    surface: 'pro-marketing',
+    code: 'service_unavailable',
+    kind: 'checkout_request_failed',
+  };
+
+  for (const [type, value] of [
+    ['TypeError', 'Failed to fetch'],
+    ['TypeError', 'Load failed'],
+    ['TypeError', 'NetworkError when attempting to fetch resource.'],
+  ]) {
+    it(`keeps "${type}: ${value}" once checkout has claimed it`, () => {
+      assert.equal(
+        isIgnored(type, value),
+        false,
+        `"${value}" must not be dropped by ignoreErrors — that layer cannot see the ownership tag`,
+      );
+      const owned = { ...event(`${type}: ${value}`), tags: { ...CHECKOUT_TAGS } };
+      assert.equal(marketingBeforeSend(owned), owned);
+    });
+
+    it(`still drops "${type}: ${value}" with no first-party report`, () => {
+      // The counter-fixture. Moving the pattern must not widen it: an untagged
+      // network failure stays as suppressed as it was in ignoreErrors.
+      assert.equal(marketingBeforeSend(event(`${type}: ${value}`)), null);
+    });
+  }
+});
+
 describe('marketing ignoreErrors', () => {
   it('drops the WKWebView host-bridge timeout (WORLDMONITOR-ZY)', () => {
     assert.equal(
@@ -261,6 +301,42 @@ describe('marketingBeforeSend — stale chunk after deploy', () => {
     ]) {
       assert.equal(marketingBeforeSend(event(value)), null, `expected ${value} dropped`);
     }
+  });
+
+  // One runtime condition — a chunk imports a named export a sibling no longer
+  // provides after a deploy — spelled three ways. The dashboard covered WebKit's
+  // and Gecko's and still reported V8's for months on `does not` vs `doesn't`
+  // (WORLDMONITOR-149); this surface covered neither `requested module` wording.
+  // Pinned as a set so the next engine variant is a decision, not a silent gap.
+  const MODULE_LINK_SPELLINGS = [
+    "The requested module './feeds-BoXv5LqL.js' does not provide an export named 's'",
+    "The requested module './feeds-BoXv5LqL.js' doesn't provide an export named: 's'",
+    "Importing binding name 's' is not found.",
+  ];
+
+  it('drops every engine spelling of the module-LINK failure', () => {
+    for (const value of MODULE_LINK_SPELLINGS) {
+      assert.equal(marketingBeforeSend(event(value)), null, `expected ${value} dropped`);
+    }
+  });
+
+  // Preservation counterpart for the spellings added above: the `!hasFirstParty`
+  // gate must still hand back a link failure attributable to this bundle.
+  it('keeps every engine spelling of the module-LINK failure on a marketing frame', () => {
+    for (const value of MODULE_LINK_SPELLINGS) {
+      const kept = event(value, ['/pro/assets/index-a1b2c3.js']);
+      assert.equal(marketingBeforeSend(kept), kept, `expected ${value} kept`);
+    }
+  });
+
+  // The rule keys on the runtime sentence, not on the phrase appearing anywhere
+  // in a message this bundle produced itself.
+  it('keeps a first-party error that merely mentions the export wording', () => {
+    const kept = event(
+      "Config validation failed: './plans.ts' does not provide an export named 'PLANS'",
+      ['pro-test/src/WelcomeApp.tsx'],
+    );
+    assert.equal(marketingBeforeSend(kept), kept);
   });
 
   it('ignores the Sentry SDK chunk when deciding first-partyness', () => {
@@ -588,6 +664,142 @@ describe('marketingBeforeSend — Safari-masked injected script (WORLDMONITOR-11
   });
 });
 
+describe('marketingBeforeSend — injected eval blocked by CSP (WORLDMONITOR-129)', () => {
+  // Verbatim production event: Edge 150 / Windows on `/pro`, an `onerror`
+  // capture whose only frames are two `<anonymous>:1` entries — a script
+  // evaluated by an extension, which our `script-src` (no 'unsafe-eval') refused.
+  const CSP_EVAL_MESSAGE = "Evaluating a string as JavaScript violates the following Content Security Policy directive because 'unsafe-eval' is not an allowed source of script: script-src 'self' 'strict-dynamic' 'nonce-wm-static-bootstrap'";
+  const evalEvent = (value: string, filenames: string[]): PolicyEvent => ({
+    exception: {
+      values: [{
+        type: 'EvalError',
+        value,
+        stacktrace: { frames: filenames.map((filename) => ({ filename })) },
+      }],
+    },
+  });
+
+  it('drops the CSP eval block raised from an evaluated script', () => {
+    assert.equal(marketingBeforeSend(evalEvent(CSP_EVAL_MESSAGE, ['<anonymous>', '<anonymous>'])), null);
+  });
+
+  it("drops Safari's phrasing of the same block", () => {
+    const safari = "Refused to evaluate a string as JavaScript because 'unsafe-eval' is not an allowed source of script in the following Content Security Policy directive: \"script-src 'self'\".";
+    assert.equal(marketingBeforeSend(evalEvent(safari, ['<anonymous>'])), null);
+  });
+
+  // Positive control for `!hasFirstParty`: if our own bundle ever reaches for
+  // eval or `new Function`, the CSP breaks that code path and it must page. It
+  // would ride a `/pro/assets/*.js` frame. Delete the gate and this goes red.
+  it('keeps the block when a marketing-bundle frame is on the stack', () => {
+    const kept = evalEvent(CSP_EVAL_MESSAGE, ['<anonymous>', '/pro/assets/index-a1b2c3.js']);
+    assert.equal(marketingBeforeSend(kept), kept);
+  });
+
+  // The same control for our INLINE first-party scripts (welcome.html's WebMCP
+  // bootstrap, prerender.mjs's DEFERRED_STYLES_SCRIPT): an eval they issue puts
+  // the document URL on the stack below the `<anonymous>` frame, and
+  // `hasFirstParty` does not count document frames (PR #8022 review).
+  it('keeps the block when the caller is an inline script on the marketing document', () => {
+    for (const doc of ['https://www.worldmonitor.app/', 'https://www.worldmonitor.app/pro']) {
+      const kept = evalEvent(CSP_EVAL_MESSAGE, ['<anonymous>', doc]);
+      assert.equal(marketingBeforeSend(kept), kept);
+    }
+  });
+
+  // Positive control for the evaluated-frame requirement: no frames at all is
+  // absence of evidence, not proof of injection.
+  it('keeps a frameless block', () => {
+    const kept = evalEvent(CSP_EVAL_MESSAGE, []);
+    assert.equal(marketingBeforeSend(kept), kept);
+  });
+
+  it('keeps an unrelated error from an evaluated script', () => {
+    const kept = evalEvent('Invalid array length', ['<anonymous>']);
+    assert.equal(marketingBeforeSend(kept), kept);
+  });
+});
+
+describe('marketingBeforeSend — injected script inserted with unparseable source (WORLDMONITOR-12D)', () => {
+  // Verbatim production event: Chrome 152 / Windows at `/`, an `onerror`
+  // capture whose eight frames are all `<anonymous>`, next to breadcrumbs from
+  // a third-party RUM beacon this surface never loads.
+  const APPEND_PARSE_MESSAGE = "Failed to execute 'appendChild' on 'Node': Invalid regular expression: missing /";
+  const PRODUCTION_FRAMES = Array.from({ length: 8 }, () => '<anonymous>');
+  const parseEvent = (type: string, value: string, filenames: string[]): PolicyEvent => ({
+    exception: {
+      values: [{
+        type,
+        value,
+        stacktrace: { frames: filenames.map((filename) => ({ filename })) },
+      }],
+    },
+  });
+
+  it('drops the parse failure raised while an evaluated script inserts its own <script>', () => {
+    assert.equal(marketingBeforeSend(parseEvent('SyntaxError', APPEND_PARSE_MESSAGE, PRODUCTION_FRAMES)), null);
+  });
+
+  it('drops the other parse wordings behind the same DOM prefix', () => {
+    const tokenMessage = "Failed to execute 'appendChild' on 'Node': Unexpected token '<'";
+    assert.equal(marketingBeforeSend(parseEvent('SyntaxError', tokenMessage, ['<anonymous>'])), null);
+  });
+
+  // Positive control for the evaluated-stack gate: turnstile.ts and
+  // debugbear-rum.ts append scripts from this bundle, and a parse failure
+  // attributable to them would ride a `/pro/assets/*.js` frame.
+  it('keeps the failure when a marketing-bundle frame is on the stack', () => {
+    const kept = parseEvent('SyntaxError', APPEND_PARSE_MESSAGE, ['<anonymous>', '/pro/assets/index-a1b2c3.js']);
+    assert.equal(marketingBeforeSend(kept), kept);
+  });
+
+  // The same control for the inline scripts this surface ships, which Chrome
+  // attributes to the document URL rather than `<anonymous>`.
+  it('keeps the failure when the caller is an inline script on the marketing document', () => {
+    for (const doc of ['https://www.worldmonitor.app/', 'https://www.worldmonitor.app/pro']) {
+      const kept = parseEvent('SyntaxError', APPEND_PARSE_MESSAGE, ['<anonymous>', doc]);
+      assert.equal(marketingBeforeSend(kept), kept);
+    }
+  });
+
+  it('keeps a frameless failure', () => {
+    const kept = parseEvent('SyntaxError', APPEND_PARSE_MESSAGE, []);
+    assert.equal(marketingBeforeSend(kept), kept);
+  });
+
+  // A frame with no filename is dropped from `nonInfraFrames`, so it cannot
+  // count toward the evaluated-stack proof: it may be the one frame that would
+  // have named our bundle (PR #8174 review).
+  it('keeps the failure when any frame has no filename', () => {
+    for (const unattributed of [{}, { filename: '' }, { filename: '   ' }]) {
+      const kept: PolicyEvent = {
+        exception: {
+          values: [{
+            type: 'SyntaxError',
+            value: APPEND_PARSE_MESSAGE,
+            stacktrace: { frames: [{ filename: '<anonymous>' }, unattributed] },
+          }],
+        },
+      };
+      assert.equal(marketingBeforeSend(kept), kept, JSON.stringify(unattributed));
+    }
+  });
+
+  // Positive control for the type gate: a script that parsed and then threw at
+  // runtime is not a parse failure, whatever its message says.
+  it('keeps the same message under a non-SyntaxError type', () => {
+    const kept = parseEvent('TypeError', APPEND_PARSE_MESSAGE, PRODUCTION_FRAMES);
+    assert.equal(marketingBeforeSend(kept), kept);
+  });
+
+  // Positive control for the DOM prefix: without it the message is just a
+  // regex SyntaxError, which a `new RegExp(userInput)` in this bundle can raise.
+  it('keeps a SyntaxError from evaluated code that lacks the appendChild prefix', () => {
+    const kept = parseEvent('SyntaxError', 'Invalid regular expression: missing /', PRODUCTION_FRAMES);
+    assert.equal(marketingBeforeSend(kept), kept);
+  });
+});
+
 describe('marketingBeforeSend — unparseable module (WORLDMONITOR-TS)', () => {
   // `action: null` means "no tags on the event at all". It must NOT be spelled
   // `undefined`: a default parameter fires on an explicit `undefined` argument,
@@ -773,17 +985,40 @@ describe('marketing beforeSend — wallet JSON-RPC rejection (WORLDMONITOR-107)'
 
   it('drops the rest of the JSON-RPC reserved range', () => {
     // -32000 (server error) and -32700 (parse error) bound the reserved block;
-    // wallets use several of them (4001 user-rejected is NOT in this range and
-    // is deliberately left reporting).
+    // wallets use several of them.
     for (const code of [-32000, -32700, -32768]) {
       assert.equal(marketingBeforeSend(rejection(code)), null, `code ${code}`);
     }
   });
 
-  it('KEEPS a plain-object rejection whose code is outside the reserved range', () => {
+  it('drops the dominant production shape: an EIP-1193 4001 from the wallet', () => {
+    // 8 of the issue's 9 events, including its first, were this payload. The
+    // original rule matched only the one -32603 event, so the issue kept
+    // regressing after every resolve.
+    assert.equal(marketingBeforeSend({
+      exception: {
+        values: [{
+          type: 'UnhandledRejection',
+          value: 'Object captured as promise rejection with keys: code, message',
+        }],
+      },
+      extra: { __serialized__: { code: 4001, message: 'synthetic wallet account error' } },
+    }), null);
+  });
+
+  it('drops every EIP-1193 provider error code', () => {
+    // EIP-1193 §Provider Errors: 4001 user rejected, 4100 unauthorized,
+    // 4200 unsupported method, 4900 disconnected, 4901 chain disconnected.
+    for (const code of [4001, 4100, 4200, 4900, 4901]) {
+      assert.equal(marketingBeforeSend(rejection(code)), null, `code ${code}`);
+    }
+  });
+
+  it('KEEPS a plain-object rejection whose code is not protocol-defined', () => {
     // Positive control: our own bundle rejecting with `{code, message}` — an
-    // HTTP status, an app error code, EIP-1193's own 4001 — must still report.
-    for (const code of [500, 4001, -1, 0]) {
+    // HTTP status or an app error code — must still report. The neighbours of
+    // every EIP-1193 code pin the set as exact values, not a 4000-4999 range.
+    for (const code of [500, 4000, 4002, 4099, 4101, 4199, 4201, 4899, 4902, -1, 0, -31999, -32769]) {
       assert.ok(marketingBeforeSend(rejection(code)) !== null, `code ${code}`);
     }
   });
@@ -792,6 +1027,8 @@ describe('marketing beforeSend — wallet JSON-RPC rejection (WORLDMONITOR-107)'
     // Absence of evidence is not evidence of an extension.
     assert.ok(marketingBeforeSend(rejection(undefined)) !== null);
     assert.ok(marketingBeforeSend(rejection('-32603')) !== null, 'string code is not proof');
+    assert.ok(marketingBeforeSend(rejection('4001')) !== null, 'string EIP-1193 code is not proof');
+    assert.ok(marketingBeforeSend(rejection(4001.5)) !== null, 'non-integer code is not proof');
     assert.ok(marketingBeforeSend({
       exception: { values: [{ type: 'UnhandledRejection', value: 'Object captured as promise rejection with keys: code, message' }] },
     }) !== null, 'no extra at all');
@@ -849,6 +1086,52 @@ describe('marketing beforeSend — wallet JSON-RPC rejection (WORLDMONITOR-107)'
       .map((f) => f.rel);
     assert.deepEqual(offenders, [],
       'a JSON-RPC client on the marketing surface invalidates the WORLDMONITOR-107 rule');
+  });
+
+  // Wallet-provider access, a Clerk Web3 sign-in call, or a literal EIP-1193
+  // code. Bare `ethereum` is not enough: the teaser strip quotes the coin by
+  // that id. The lookarounds skip decimals such as a coordinate ending in
+  // `.4100`.
+  //
+  // The Clerk half matters because `@clerk/clerk-js` bundles wallet SDKs and
+  // its Web3 helpers rethrow provider errors. That path is reachable only when
+  // our code calls those helpers (scanned here) or Web3 sign-in is enabled on
+  // the Clerk instance, which no repo test can see.
+  const WALLET_PROVIDER_CODE =
+    /\bwindow\.ethereum\b|\bethereum\.(?:request|enable|send|on)\b|\beth_[a-z]\w*|eip-?1193|\bauthenticateWith(?:Metamask|CoinbaseWallet|OKXWallet|Base|Solana|Web3)\b|\bweb3_?wallet\b|(?<![\d.])(?:4001|4100|4200|4900|4901)(?![\d.])/i;
+
+  it('pins the marketing bundle as wallet-free, which is what licenses the EIP-1193 codes', () => {
+    // The EIP-1193 codes prove third-party origin only while no first-party code
+    // here talks to a wallet provider or mints one of those codes itself.
+    const offenders = marketingFirstPartySources()
+      .filter((f) => !f.rel.includes('sentry-filter-policy'))
+      .filter((f) => WALLET_PROVIDER_CODE.test(f.code))
+      .map((f) => f.rel);
+    assert.deepEqual(offenders, [],
+      'wallet-provider code on the marketing surface invalidates the WORLDMONITOR-107 EIP-1193 rule');
+  });
+
+  it('the wallet-free scan flags real provider code and ignores coin ids and decimals', () => {
+    for (const code of [
+      "await window.ethereum.request({ method: 'eth_requestAccounts' })",
+      'provider.ethereum.on("accountsChanged", fn)',
+      'reject({ code: 4001, message: "User rejected" })',
+      'if (err.code === 4900) retry()',
+      '// EIP-1193 provider',
+      'await clerk.authenticateWithMetamask({ redirectUrl })',
+      'await signIn.authenticateWithCoinbaseWallet()',
+      "strategy: 'web3_wallet'",
+    ]) {
+      assert.ok(WALLET_PROVIDER_CODE.test(code), `must flag: ${code}`);
+    }
+    for (const code of [
+      "const CRYPTO_QUOTE_IDS = ['bitcoin', 'ethereum'];",
+      "ETH: 'Ethereum',",
+      "node('khorgos', 'Khorgos', 'crossing', 44.2140, 80.4100)",
+      'const port = 40010;',
+    ]) {
+      assert.ok(!WALLET_PROVIDER_CODE.test(code), `must not flag: ${code}`);
+    }
   });
 
   it('the JSON-RPC scan reaches the whole bundle, shared/ included', () => {
@@ -1090,8 +1373,36 @@ describe('marketing ignoreErrors — injected-script classes (2026-09-02 triage)
     );
   });
 
+  it('drops the WebAuthn service-connection rejection (WORLDMONITOR-12H)', () => {
+    // Verbatim production value: Chrome 152 / macOS on `/pro`, zero frames,
+    // `onunhandledrejection`, breadcrumbs ending at Clerk's
+    // `POST /v1/client/sign_ins` after clicks on the identifier field.
+    // Chromium raises it when the platform authenticator service cannot be
+    // reached, from the same WebAuthn surface as WORLDMONITOR-11Q.
+    assert.equal(
+      isIgnored('Error', 'NotSupportedError: Error connecting to Web Authentication service.'),
+      true,
+    );
+    assert.equal(
+      isIgnored('Error', 'Error: NotSupportedError: Error connecting to Web Authentication service.'),
+      true,
+    );
+  });
+
   it('keeps other NotSupportedError messages so a real one still reports', () => {
+    for (const prefix of ['', 'Error: ']) {
+      for (const suffix of ['\n', '\r', '\r\n', '\u2028', '\u2029']) {
+        assert.equal(
+          isIgnored('Error', `${prefix}NotSupportedError: Error connecting to Web Authentication service.${suffix}`),
+          false,
+        );
+      }
+    }
     assert.equal(isIgnored('Error', 'NotSupportedError: The operation is not supported.'), false);
+    assert.equal(
+      isIgnored('Error', 'NotSupportedError: Error connecting to Web Authentication service. Retrying checkout'),
+      false,
+    );
   });
 
   it('pins the marketing surface as WebAuthn-free, which is what licenses the rule', () => {
@@ -1207,5 +1518,38 @@ describe('marketingBeforeSend — leaked fetch deadline stays visible (WORLDMONI
   it('keeps an unrelated timeout-flavoured message', () => {
     const kept = event('Entitlement poll signal timed out after 8s');
     assert.equal(marketingBeforeSend(kept), kept);
+  });
+});
+
+describe('MARKETING_IGNORE_ERRORS — Clerk SDK network failure (WORLDMONITOR-12W)', () => {
+  const VALUE = 'ClerkJS: Network error at "https://clerk.worldmonitor.app/v1/client/sign_ups/sua_3JOrGrIdgb1q4iGoehhFRkIKkFL/attempt_verification" - TypeError: Failed to fetch (clerk.worldmonitor.app). Please try again.';
+
+  it('drops the verbatim production value', () => {
+    assert.equal(isIgnored('Error', VALUE), true);
+    // Some engines fold the type into the value.
+    assert.equal(isIgnored('Error', `Error: ${VALUE}`), true);
+  });
+
+  it('is not reachable through marketingBeforeSend, which is why it needs an entry', () => {
+    // Clerk's chunk lives under /pro/assets/, so the frame counts as
+    // first-party and the value is an `Error`, not a `TypeError`.
+    const kept = event(VALUE, ['https://www.worldmonitor.app/pro/assets/clerk-Dl1fSlM7.js']);
+    assert.equal(marketingBeforeSend(kept), kept);
+  });
+
+  it('keeps a message that merely mentions ClerkJS mid-sentence', () => {
+    assert.equal(isIgnored('Error', 'Checkout aborted after ClerkJS: Network error'), false);
+  });
+
+  it('keeps other ClerkJS failures so a misconfiguration still reports', () => {
+    assert.equal(isIgnored('Error', 'ClerkJS: Response: invalid redirect_url'), false);
+  });
+
+  it('pins the marketing surface as ClerkJS-free, the rule\'s licence', () => {
+    const offenders = marketingFirstPartySources()
+      .filter((f) => !f.rel.includes('sentry-filter-policy'))
+      .filter((f) => /ClerkJS/.test(f.code))
+      .map((f) => f.rel);
+    assert.deepEqual(offenders, [], 'the marketing surface now mints a ClerkJS-prefixed message — re-derive the WORLDMONITOR-12W rule');
   });
 });

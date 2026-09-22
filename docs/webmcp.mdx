@@ -267,7 +267,7 @@ A preset is monitor-compatible when at least two of its non-map panels appear in
 
 ## Human control and UI behavior
 
-- Imperative tools register synchronously at startup, but wait for the necessary UI or map renderer before acting. Destroying the app aborts pending work and unregisters its tools; same-document reinitialization does not create duplicates.
+- Imperative tools register synchronously at startup, before the dashboard application bundle loads. A call made before the application loads waits up to 30 seconds for it, then for the necessary UI or map renderer. If the application fails to load, pending calls reject with a `WebMcpToolError` naming `app_destroyed` and the tools are unregistered. Destroying the app aborts pending work and unregisters its tools; same-document reinitialization does not create duplicates.
 - Actions go through the same UI, agent-bus, panel, and map paths used by human controls. They do not call a privileged backend shortcut.
 - Authentication, subscription entitlement, dashboard variant, mounted-panel availability, layer policy, and renderer readiness are evaluated at invocation time. A tool discovered while signed in cannot retain access after sign-out or downgrade.
 - Successful mutations remain visible: panels open, the search palette appears, map state changes, dashboard tabs change, and the declarative procurement form shows active/pending state.

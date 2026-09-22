@@ -1,3 +1,4 @@
+import { PRODUCT_CATALOG } from "../config/productCatalog";
 /**
  * #6335 — the checkout stamps the authenticated login email into signed
  * metadata, so the activation webhook does not have to trust `users.email`
@@ -27,7 +28,7 @@ vi.mock("../lib/dodo", () => ({
 
 const modules = import.meta.glob("../**/*.ts");
 const SIGNING_SECRET = "checkout-login-email-test-signing-secret";
-const PRODUCT_ID = "pdt_login_email_metadata";
+const PRODUCT_ID = PRODUCT_CATALOG.pro_monthly.dodoProductId!;
 const CLERK_USER = {
   subject: "user_login_email_metadata",
   tokenIdentifier: "clerk|user_login_email_metadata",

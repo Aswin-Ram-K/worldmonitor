@@ -245,7 +245,7 @@ export function mergeTenderSourceResults({ settled, sourceNames, previousSnapsho
         fetchedAt: result.value.status.fetchedAt || attemptedAt,
         lastSuccessfulAt: result.value.status.lastSuccessfulAt || result.value.status.fetchedAt || attemptedAt,
         stale: false,
-        ...(source === 'contracts-finder' ? { consecutiveFailures: 0, firstFailureAt: '' } : {}),
+        ...(['contracts-finder', 'world-bank'].includes(source) ? { consecutiveFailures: 0, firstFailureAt: '' } : {}),
       });
       continue;
     }
@@ -255,7 +255,7 @@ export function mergeTenderSourceResults({ settled, sourceNames, previousSnapsho
     const priorStatus = previousStatuses.get(source);
     const fulfilledStatus = result.status === 'fulfilled' ? result.value?.status : null;
     const error = string(fulfilledStatus?.error || result.reason?.message || 'upstream request failed').slice(0, 200);
-    if (source === 'contracts-finder') {
+    if (['contracts-finder', 'world-bank'].includes(source)) {
       // A bundle success or a failed source attempt is not a source success.
       const lastSuccessfulAt = firstString(priorStatus?.lastSuccessfulAt,
         priorStatus?.state === 'ok' ? priorStatus.fetchedAt : '');
@@ -284,17 +284,21 @@ export function mergeTenderSourceResults({ settled, sourceNames, previousSnapsho
       });
       continue;
     }
+    // A fulfilled status reports its own last attempt: a paced SAM run made no
+    // request and carries the prior attempt time forward, which is what its
+    // pacing gate measures (#8505). Only a rejection is stamped with this run.
+    const fetchedAt = fulfilledStatus?.fetchedAt || attemptedAt;
     if (priorRecords.length > 0) {
       const lastSuccessfulAt = firstString(priorStatus?.lastSuccessfulAt, priorStatus?.fetchedAt,
         isoTimestamp(previousSnapshot?.fetchedAt));
       records.push(...priorRecords);
       sourceStatuses.push({
-        source, state: 'stale', recordCount: priorRecords.length, fetchedAt: attemptedAt,
+        source, state: 'stale', recordCount: priorRecords.length, fetchedAt,
         lastSuccessfulAt, stale: true, ...(error ? { error } : {}),
       });
     } else {
       sourceStatuses.push({
-        source, state: fulfilledStatus?.state || 'error', recordCount: 0, fetchedAt: attemptedAt,
+        source, state: fulfilledStatus?.state || 'error', recordCount: 0, fetchedAt,
         lastSuccessfulAt: firstString(priorStatus?.lastSuccessfulAt, priorStatus?.fetchedAt), stale: false,
         ...(error ? { error } : {}),
       });
