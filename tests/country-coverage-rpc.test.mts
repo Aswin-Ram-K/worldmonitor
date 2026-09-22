@@ -17,11 +17,10 @@ import {
 } from '../server/worldmonitor/intelligence/v1/get-country-coverage.ts';
 import {
   collectStructuredIncidents,
-  countryBox,
-  inBox,
   type StructuredDependencies,
   type StructuredSourceResult,
 } from '../server/worldmonitor/intelligence/v1/_country-coverage-structured.ts';
+import { countryBox, inBox } from '../shared/country-bbox.ts';
 import {
   buildEventQueryTerms,
   countryEventFeed,
@@ -524,6 +523,23 @@ describe('GetCountryCoverage — refresh behaviour', () => {
 });
 
 describe('GetCountryCoverage — geographic containment', () => {
+  it('contains Russia on both sides of the dateline without matching western Europe or North America', () => {
+    const box = countryBox('RU');
+    for (const [lat, lon] of [[55.75, 37.62], [65, 179], [65, -175]]) {
+      assert.equal(inBox(box, lat, lon), true, `${lat},${lon} belongs in Russia's bounds`);
+    }
+    for (const [lat, lon] of [[52.52, 13.4], [48.86, 2.35], [51.51, -0.13], [43.65, -79.38], [47.61, -122.33]]) {
+      assert.equal(inBox(box, lat, lon), false, `${lat},${lon} must not match Russia`);
+    }
+  });
+
+  it('rejects collapsed country boxes and invalid geographic coordinates', () => {
+    assert.equal(inBox({ south: 41.21, west: -180, north: 81.29, east: 180 }, 52.52, 13.4), false);
+    assert.equal(inBox({ south: 60, west: 170, north: 70, east: -170 }, 65, 540), false);
+    assert.equal(inBox(countryBox('AQ'), -75, 0), true, 'full-longitude polar containment remains valid');
+    assert.equal(inBox(countryBox('AQ'), -75, 175), true);
+  });
+
   it('reads the shared bounding box as [south, west, north, east]', () => {
     const box = countryBox('IL');
     assert.ok(box, 'Israel must have a bounding box');
@@ -618,6 +634,80 @@ describe('collectStructuredIncidents — producer status', () => {
     assert.ok(match, `expected a ${source} producer`);
     return match!;
   }
+
+  it('keeps Russian incidents across the dateline and rejects foreign attribution in every geographic lane', async () => {
+    const points = [
+      { name: 'Moscow', country: 'RU', lat: 55.75, lon: 37.62 },
+      { name: 'Chukotka east', country: '', lat: 65, lon: 179 },
+      { name: 'Chukotka west', country: '', lat: 65, lon: -175 },
+      { name: 'Berlin', country: 'Germany', lat: 52.52, lon: 13.4 },
+      { name: 'Toronto', country: 'Canada', lat: 43.65, lon: -79.38 },
+    ];
+    const namedProtests = [...points, { name: 'Kazakhstan labelled', country: 'Kazakhstan', lat: 55, lon: 70 }];
+    const queries: { swLon: number; neLon: number; cursor: string }[] = [];
+    const results = await collectStructuredIncidents({
+      ctx, code: 'RU', countryName: 'Russia', cutoffMs: NOW_MS - DAY, now: NOW_MS,
+      deps: structuredDeps({
+        listUnrestEvents: async () => ({ events: namedProtests.map(p => ({
+          id: p.name, title: p.name, country: p.country, occurredAt: NOW_MS - HOUR,
+          severity: 'SEVERITY_LEVEL_HIGH', location: { latitude: p.lat, longitude: p.lon },
+        })) }),
+        listEarthquakes: async () => ({ earthquakes: points.map(p => ({
+          id: p.name, place: p.name, magnitude: 5, occurredAt: NOW_MS - HOUR,
+          location: { latitude: p.lat, longitude: p.lon },
+        })) }),
+        listIranEvents: async () => ({ scrapedAt: String(NOW_MS), events: points.map(p => ({
+          id: p.name, title: p.name, latitude: p.lat, longitude: p.lon,
+          timestamp: String(NOW_MS - HOUR), severity: 'high',
+        })) }),
+        listMilitaryFlights: async (_ctx, req) => {
+          queries.push(req);
+          assert.ok(req.swLon <= req.neLon && req.neLon - req.swLon < 360, 'only ordinary bounded queries reach flights');
+          const matches = points.filter(p => p.lon >= req.swLon && p.lon <= req.neLon);
+          const page = req.cursor ? matches.slice(1) : matches.slice(0, 1);
+          return {
+            flights: page.map(p => ({ ...flight(p.name), location: { latitude: p.lat, longitude: p.lon } })),
+            clusters: [], pagination: { nextCursor: !req.cursor && matches.length > 1 ? 'page2' : '', totalCount: matches.length },
+          };
+        },
+      } as Partial<StructuredDependencies>),
+    });
+    for (const source of ['structured:protests', 'structured:earthquakes', 'structured:strikes', 'structured:military-flights']) {
+      const result = find(results, source);
+      assert.equal(result.state, 'ok');
+      assert.equal(result.incidents.length, 3, source);
+      assert.ok(result.incidents.every(i => !/Berlin|Toronto|Kazakhstan/.test(i.label)), source);
+    }
+    assert.deepEqual(queries.map(q => [q.swLon, q.neLon, q.cursor]), [
+      [19.6, 180, ''], [19.6, 180, 'page2'], [-180, -169.7, ''],
+    ]);
+  });
+
+  it('reports a split flight query failure and never queries full-longitude countries', async () => {
+    const ru = await collectStructuredIncidents({
+      ctx, code: 'RU', countryName: 'Russia', cutoffMs: NOW_MS - DAY, now: NOW_MS,
+      deps: structuredDeps({ listMilitaryFlights: async (_ctx, req) => {
+        if (req.swLon < 0) throw new Error('east-of-dateline query failed');
+        return { flights: [{ ...flight('MOSCOW'), location: { latitude: 55.75, longitude: 37.62 } }], clusters: [] };
+      } } as Partial<StructuredDependencies>),
+    });
+    assert.equal(find(ru, 'structured:military-flights').state, 'failed');
+    assert.deepEqual(find(ru, 'structured:military-flights').incidents, []);
+    let calls = 0;
+    const aq = await collectStructuredIncidents({
+      ctx, code: 'AQ', countryName: 'Antarctica', cutoffMs: NOW_MS - DAY, now: NOW_MS,
+      deps: structuredDeps({
+        listMilitaryFlights: async () => { calls++; throw new Error('must not call'); },
+        listEarthquakes: async () => ({ earthquakes: [{
+          id: 'polar-quake', place: 'Southern Ocean', magnitude: 5, occurredAt: NOW_MS - HOUR,
+          location: { latitude: -75, longitude: 175 },
+        }] }),
+      } as Partial<StructuredDependencies>),
+    });
+    assert.equal(calls, 0);
+    assert.equal(find(aq, 'structured:military-flights').state, 'unavailable');
+    assert.equal(find(aq, 'structured:earthquakes').incidents.length, 1);
+  });
 
   it('always reports all six producers, in a stable order', async () => {
     const results = await collect();
@@ -757,6 +847,74 @@ describe('collectStructuredIncidents — producer status', () => {
     const quakes = find(results, 'structured:earthquakes');
     assert.deepEqual(quakes.incidents.map(i => i.label), ['M5.2 near Israel']);
     assert.equal(quakes.incidents[0]?.severity, 'high');
+  });
+
+  it('rejects superstring place names that only contain the country name', async () => {
+    // Substring matching attributed foreign quakes to the wrong country:
+    // Nigeria to Niger, Somalia to Mali, Romania to Oman, Indiana to India,
+    // South Sudan to Sudan. Each place below sits far outside the request
+    // country's box, so only the name arm can fire — and it must not.
+    const superstrings: Array<[string, string, { lat: number; lon: number }]> = [
+      ['NE', 'Niger', { lat: 6.45, lon: 3.39 }], // Lagos, Nigeria
+      ['ML', 'Mali', { lat: 2.03, lon: 45.34 }], // Mogadishu, Somalia
+      ['OM', 'Oman', { lat: 44.42, lon: 26.1 }], // Bucharest, Romania
+      ['IN', 'India', { lat: 39.16, lon: -86.52 }], // Bloomington, Indiana
+      ['SD', 'Sudan', { lat: 4.85, lon: 31.57 }], // Juba, South Sudan
+    ];
+    const foreignPlace: Record<string, string> = {
+      NE: '10km S of Lagos, Nigeria',
+      ML: 'Mogadishu, Somalia',
+      OM: 'Bucharest, Romania',
+      IN: 'Bloomington, Indiana',
+      SD: 'Juba, South Sudan',
+    };
+    for (const [code, name, loc] of superstrings) {
+      const results = await collectStructuredIncidents({
+        ctx, code, countryName: name, cutoffMs: NOW_MS - DAY, now: NOW_MS,
+        deps: structuredDeps({
+          listEarthquakes: async () => ({ earthquakes: [{
+            id: `q-${code}`, place: foreignPlace[code], magnitude: 5.2, depthKm: 10,
+            location: { latitude: loc.lat, longitude: loc.lon },
+            occurredAt: NOW_MS - 2 * HOUR, sourceUrl: '', source: 'usgs', category: '',
+          }] }),
+        } as Partial<StructuredDependencies>),
+      });
+      assert.equal(
+        find(results, 'structured:earthquakes').incidents.length, 0,
+        `${foreignPlace[code]} must not attribute to ${name}`,
+      );
+    }
+  });
+
+  it('rejects demonym matches in USGS place labels', async () => {
+    // The shared matcher is tuned for news prose, where a demonym names a
+    // country. A USGS `place` is a toponym, where it does not: these five all
+    // matched once the shared matcher was wired in (the old substring test
+    // missed them), attributing Alaskan and Utah quakes to the Netherlands and
+    // Spain. collectEarthquakes drops the demonym arm for this reason.
+    const demonymTraps: Array<[string, string, string, { lat: number; lon: number }]> = [
+      ['NL', 'Netherlands', '73 km SE of Dutch Harbor, Alaska', { lat: 53.9, lon: -166.5 }],
+      ['ES', 'Spain', '10 km N of Spanish Fork, Utah', { lat: 40.1, lon: -111.65 }],
+      ['PH', 'Philippines', 'Philippine Sea', { lat: 20.0, lon: 130.0 }],
+      ['NO', 'Norway', 'Norwegian Sea', { lat: 68.0, lon: 2.0 }],
+      ['FR', 'France', '12 km SW of French Camp, California', { lat: 37.87, lon: -121.27 }],
+    ];
+    for (const [code, name, place, loc] of demonymTraps) {
+      const results = await collectStructuredIncidents({
+        ctx, code, countryName: name, cutoffMs: NOW_MS - DAY, now: NOW_MS,
+        deps: structuredDeps({
+          listEarthquakes: async () => ({ earthquakes: [{
+            id: `q-${code}`, place, magnitude: 5.2, depthKm: 10,
+            location: { latitude: loc.lat, longitude: loc.lon },
+            occurredAt: NOW_MS - 2 * HOUR, sourceUrl: '', source: 'usgs', category: '',
+          }] }),
+        } as Partial<StructuredDependencies>),
+      });
+      assert.equal(
+        find(results, 'structured:earthquakes').incidents.length, 0,
+        `${place} must not attribute to ${name} via its demonym`,
+      );
+    }
   });
 
   it('rejects a structured record geolocated outside the country box', async () => {

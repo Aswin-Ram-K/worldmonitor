@@ -7,6 +7,8 @@
 // The freeze imports this module under bare Node.js.
 
 import { publisherFamilyFor, publisherFamilyForDomain } from '../shared/publisher-families.js';
+import { AGGREGATOR_LINK_HOSTS, isVerifiableArticleUrl } from '../shared/article-url.js';
+export { AGGREGATOR_LINK_HOSTS, isVerifiableArticleUrl };
 import { validateNoHallucinatedProperNouns } from '../shared/brief-llm-core.js';
 import { resolveIso2 } from './_country-resolver.mjs';
 const BRIEF_SECTION_HEADERS = ['SITUATION NOW', 'KEY RISKS', 'OUTLOOK', 'WATCH ITEMS'];
@@ -18,29 +20,12 @@ const BRIEF_SECTION_HEADERS = ['SITUATION NOW', 'KEY RISKS', 'OUTLOOK', 'WATCH I
 // an indexed page) and the brief floor requires at least one curated row.
 export const COUNTRY_INDEX_ORIGIN = 'country-index';
 
-// Aggregator hosts whose article links are opaque, expiring redirects rather
-// than the publisher's own URL. A frozen row is published for up to
-// MAX_LIVE_PULSE_SNAPSHOT_AGE_DAYS, and "verifiable" has to mean a reader can
-// see the outlet in the URL and still reach the piece next week. Shared by
-// the freeze's capture rule, the welcome strip's publish-time re-check and
-// the brief floor (a redirect host is not a site two labels can share).
-export const AGGREGATOR_LINK_HOSTS = new Set(['news.google.com']);
-
 function hostnameOf(url) {
   try {
     return new URL(String(url || '').trim()).hostname.toLowerCase().replace(/\.+$/, '');
   } catch {
     return '';
   }
-}
-
-/** True for an https URL on a publisher's own host (never an aggregator redirect). */
-export function isVerifiableArticleUrl(url) {
-  const value = String(url || '').trim();
-  const parsed = URL.parse(value);
-  if (!parsed || parsed.protocol !== 'https:' || !parsed.hostname) return false;
-  const hostname = parsed.hostname.toLowerCase().replace(/\.+$/, '');
-  return hostname.length > 0 && !AGGREGATOR_LINK_HOSTS.has(hostname);
 }
 
 export function isBriefSectionHeader(line, { countryCode = '', countryName = '' } = {}) {

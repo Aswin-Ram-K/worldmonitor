@@ -128,10 +128,24 @@ The rest of the contract:
   expires;
 - margin publishes on a T+1 lag, and northbound publishes after each session
   closes;
+- if one margin source has a transport failure, the adapter retains the complete
+  last-good SSE/SZSE margin pair for less than three hours after verification.
+  `margin.retained` identifies this fallback. `margin.verifiedAt` and the common
+  trade date stay unchanged across repeated failures. A current SSE observation
+  is never combined with an older SZSE observation. Verification checks each
+  exchange's total against financing plus securities lending, allowing only
+  SZSE's independent rounding to 0.01 亿 (CNY 1 million);
+- expired or incomplete prior pairs, malformed responses, conflicting trade
+  dates, and simultaneous margin-source failures do not qualify for retention.
+  Source errors and `status: 'degraded'` remain visible during retention. A
+  successful complete refresh clears `margin.retained` and updates `verifiedAt`;
 - SZSE endpoints are date-keyed, so the seeder pins the date from the exchange
   trading calendar
   (`https://www.szse.cn/api/report/exchange/onepersistenthour/monthList`) and
-  probes back a bounded number of trading days; and
+  probes back a bounded number of trading days. Within each run, later sources
+  and dates reuse the successful proxy exit. If that exit fails, the existing
+  bounded fallback skips that already-failed exit for the same request.
+  Request and time budgets are unchanged; and
 - the lane runs hourly as a member of the `seed-bundle-market-backup` Railway
   bundle.
 

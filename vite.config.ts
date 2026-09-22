@@ -1074,7 +1074,9 @@ export default defineConfig(({ mode }) => {
           // Web Push handler (Phase 6). importScripts runs in the SW
           // context; /push-handler.js is a static file copied from
           // public/ and attaches 'push' + 'notificationclick' listeners.
-          importScripts: ['/push-handler.js', '/sw-navigation.js'],
+          // /link-suppression-check.js must load BEFORE the push handler
+          // so notificationclick can consult the operator block set (#8401).
+          importScripts: ['/link-suppression-check.js', '/push-handler.js', '/sw-navigation.js'],
 
           // Navigations are handled by public/sw-navigation.js (network-first
           // with an offline.html fallback), NOT by a runtime cache: a cached
@@ -1223,6 +1225,24 @@ export default defineConfig(({ mode }) => {
           // DeckGLMap boundary.
           onlyExplicitManualChunks: true,
           manualChunks(id) {
+            // Keep the existing secondary-flow chunk stable when standalone
+            // entries stop sharing panel dependencies with the dashboard.
+            if (id.endsWith('/src/services/checkout.ts')) {
+              return 'checkout';
+            }
+            // Give the layered dashboard stylesheet a CSS-only chunk. Vite folds a
+            // CSS-only chunk into each importing entry's own CSS, so dashboard.html
+            // links it. Left inside a shared JavaScript chunk it inherited that
+            // chunk's name (debugbear-rum-*.css) and could lose its link: Vite 6
+            // caches each chunk's CSS list across HTML entries, and the main entry
+            // chunk is also imported by App and live-channels, so the cached list
+            // can omit CSS another entry reached first. The preload helper then
+            // fetched the stylesheet for import('./App'), and a failed download
+            // aborted the dashboard boot (WORLDMONITOR-XT). Guarded by
+            // tests/dashboard-critical-css.test.mjs.
+            if (id.endsWith('/src/styles/base-layer.css')) {
+              return 'dashboard-styles';
+            }
             if (id.includes('node_modules')) {
               if (id.includes('/@xenova/transformers/')) {
                 return 'transformers';

@@ -14,6 +14,7 @@ import { validateUserApiKey } from '../../../_shared/user-api-key';
 import {
   requirePremiumRpcAccess,
 } from '../../../_shared/premium-check';
+import { pruneOwnerWebhookIndex } from './webhook-owner-index';
 import { runRedisPipeline } from '../../../_shared/redis';
 import {
   WEBHOOK_TTL,
@@ -95,6 +96,7 @@ export async function registerWebhook(
   }
 
   const ownerTag = await callerFingerprint(ctx.request, apiKeyResult.credential);
+  await pruneOwnerWebhookIndex(ownerTag);
   const newSubscriberId = generateSubscriberId();
   const secret = await generateSecret();
 
@@ -109,11 +111,18 @@ export async function registerWebhook(
     secret,
   };
 
-  await runRedisPipeline([
+  const results = await runRedisPipeline([
     ['SET', webhookKey(newSubscriberId), JSON.stringify(record), 'EX', String(WEBHOOK_TTL)],
     ['SADD', ownerIndexKey(ownerTag), newSubscriberId],
     ['EXPIRE', ownerIndexKey(ownerTag), String(WEBHOOK_TTL)],
   ]);
+
+  if (!Array.isArray(results) || results.length !== 3 || results.some(result => !result || result.error)
+    || results[0]?.result !== 'OK'
+    || ![0, 1, '0', '1'].includes(results[1]?.result as number | string)
+    || (results[2]?.result !== 1 && results[2]?.result !== '1')) {
+    throw new ApiError(503, 'Webhook registration could not be confirmed', '');
+  }
 
   return { subscriberId: newSubscriberId, secret };
 }

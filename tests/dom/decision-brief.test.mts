@@ -314,7 +314,11 @@ for (const [outcome, attemptState] of Object.entries(germanyOutcomes)) it(`prese
 
 it('service capture requests the selected heading and carries reader provenance into exports', async () => {
   redis.clear();
-  redis.set('comtrade:bilateral-hs4:JP:v1',{iso2:'JP',fetchedAt:new Date().toISOString(),products:[{hs4:'2804',description:'Helium',year:2024,totalValue:1000,topExporters:[{partnerCode:842,partnerIso2:'',value:392,share:0.392}]}]});
+  redis.set('comtrade:bilateral-hs4:JP:v1',{iso2:'JP',fetchedAt:new Date().toISOString(),products:[{hs4:'2804',description:'Helium',year:2024,totalValue:1000,topExporters:[
+    {partnerCode:842,partnerIso2:'',value:392,share:0.392},
+    {partnerCode:36,partnerIso2:'AU',value:300,share:0.3},
+    {partnerCode:634,partnerIso2:'QA',value:200,share:0.2},
+  ]}]});
   const requests: URL[]=[];
   vi.spyOn(globalThis,'fetch').mockImplementation(async (input) => {
     const url = new URL(input instanceof Request ? input.url : String(input), 'https://example.test'); requests.push(url);
@@ -327,8 +331,12 @@ it('service capture requests the selected heading and carries reader provenance 
   expect(requests.find(url=>url.pathname.endsWith('/get-country-products'))?.searchParams.get('hs4')).toBe('2804');
   const snapshot=buildCommodityBrief(selection,capture);
   expect(snapshot.candidates[0]?.sharePct).toBe(39.2);
+  expect(snapshot.candidates.find(c => c.origin === 'AU')).toMatchObject({sharePct:30,routeState:'unknown',routeIds:[],transitChokepoints:[]});
+  expect(snapshot.candidates.find(c => c.origin === 'QA')).toMatchObject({sharePct:20,routeState:'exposed',affectedChokepoints:['hormuz_strait']});
+  expect(snapshot.coverage.join(' ')).toContain('Modeled routes: 1/3 listed origins');
   expect(snapshot.capture.products.evidence?.state).toBe('partial');
   const article=renderCommodityBrief(snapshot);
+  expect(article.querySelector('[data-origin="AU"]')?.textContent).toContain('Route unknown');
   expect(JSON.parse(article.querySelector('script')!.textContent!)).toEqual(snapshot);
 });
 

@@ -13,16 +13,22 @@ import {
   minimumBriefCaptures,
   mintSession,
   normalizeApiBase,
+  selectFrozenHeadlines,
   selectFrozenQuotes,
   timelineRecord,
   selectCountryHeadlines,
 } from '../scripts/freeze-crawlable-live-pulse.mjs';
 import {
+  dedupeByArticleUrl,
+  duplicateArticleUrls,
+  normalizeArticleUrl,
+} from '../shared/article-identity.js';
+import {
   COUNTRY_INDEX_MAX_AGE_MS,
   selectCountryIndexHeadlines,
 } from '../scripts/crawlable-country-index.mjs';
 import { GDELT_COUNTRY_INDEX_WINDOW_MS } from '../scripts/_gdelt-bulk-materializer.mjs';
-import { COUNTRY_INDEX_ORIGIN, developmentsHasDatedItem } from '../scripts/crawlable-developments.mjs';
+import { briefGroundingGap, COUNTRY_INDEX_ORIGIN, developmentsHasDatedItem } from '../scripts/crawlable-developments.mjs';
 import { SCORECARD_DECLARED_FIELDS, classifyAccuracyState } from '../scripts/build-accuracy-page.mjs';
 
 describe('freeze crawlable live pulse API base routing', () => {
@@ -131,11 +137,21 @@ function countryPayload() {
     };
   }
 
+  const DEFAULT_DIGEST_TITLE = 'Outside forces fuel Sudan war, new report finds';
+
   function digestItem(overrides = {}) {
+    const title = overrides.title ?? DEFAULT_DIGEST_TITLE;
     return {
-      title: 'Outside forces fuel Sudan war, new report finds',
+      title,
       source: 'UN News',
-      link: 'https://news.un.org/feed/view/en/story/2026/09/1168270',
+      // One article is one URL. The strip dedupes by normalized article URL
+      // (#8339), so a fixture reusing a single link across several distinct
+      // stories would collapse to one row and stop exercising ranking at all.
+      // Derive it from the title so every fixture story is its own document,
+      // and keep the canonical Sudan story on its real URL.
+      link: title === DEFAULT_DIGEST_TITLE
+        ? 'https://news.un.org/feed/view/en/story/2026/09/1168270'
+        : `https://news.un.org/feed/view/en/story/2026/09/${encodeURIComponent(title)}`,
       publishedAt: Date.now() - 60 * 60 * 1000,
       importanceScore: 50,
       ...overrides,
@@ -235,6 +251,8 @@ function countryPayload() {
     digestItemsByVariant = null,
     // Variants whose fetch fails with a 503.
     digestFailVariants = [],
+    countryHeadlines = {},
+    countryHeadlineState = 'complete',
     briefStatus = 'ok',
     briefOverrides = {},
     briefFailCodes = [],
@@ -293,6 +311,10 @@ function countryPayload() {
           ? digestItemsByVariant[variant]
           : digestItems;
         return jsonResponse(digestPayload(items, digestCoverage));
+      }
+      if (href.includes('list-country-headlines')) {
+        if (countryHeadlineState === 'fail') return { ok: false, status: 503, text: async () => '{}' };
+        return jsonResponse({ countries: countryHeadlines, feedTotal: 245, feedCached: countryHeadlineState === 'complete' ? 245 : 0, state: countryHeadlineState });
       }
       if (href.includes('get-forecast-scorecard')) {
         if (scorecardStatus === 'fail') return { ok: false, status: 503, text: async () => '{}' };
@@ -1356,6 +1378,81 @@ describe('freeze per-country developments capture', () => {
     assert.deepEqual(selectCountryIndexHeadlines([], 'PWX'), []);
   });
 
+  it('recovers curated country reporting discarded by dashboard category caps', async () => {
+    const headline = digestItem({
+      title: 'Palau approves new maritime surveillance funding',
+      source: 'Island Times (Palau)',
+      link: 'https://islandtimes.org/palau-maritime-funding',
+    });
+    stubFetch({ countryHeadlines: { PW: { items: [headline] } } });
+    const { snapshot } = await runFreeze({ serviceKey: 'test-key' });
+    const palau = snapshot.countries.PW.developments;
+    assert.equal(palau.headlines.length, 1);
+    assert.equal(palau.headlines[0].url, headline.link);
+    assert.equal(palau.headlines[0].origin, undefined, 'registered RSS retains curated provenance');
+    assert.equal(palau.briefSkipped, 'thin-grounding', 'one publisher still cannot support a brief');
+    assert.equal(snapshot.coverage.developmentsCuratedFeeds.recoveredCountryCount, 1);
+  });
+
+  it('combines recovered curated reporting with independent index sources for a cited brief', async () => {
+    const headline = digestItem({
+      title: 'Palau approves new maritime surveillance funding',
+      source: 'Island Times (Palau)',
+      link: 'https://islandtimes.org/palau-maritime-funding',
+    });
+    stubFetch({
+      countryHeadlines: { PW: { items: [headline] } },
+      countryArticles: { PW: palauIndexArticles() },
+    });
+    const { snapshot } = await runFreeze({ serviceKey: 'test-key' });
+    const palau = snapshot.countries.PW.developments;
+    assert.ok(palau.brief, 'recovered curated source plus independent reporting reaches brief capture');
+    assert.equal(palau.briefSkipped, null);
+    assert.equal(palau.brief.sources[0].url, headline.link);
+    assert.equal(palau.brief.sources[0].origin, undefined);
+    assert.ok(palau.brief.sources.slice(1).every(source => source.origin === COUNTRY_INDEX_ORIGIN));
+    assert.equal(snapshot.coverage.briefEligibleCount, 1);
+    assert.equal(snapshot.coverage.briefCountryCount, 1);
+  });
+
+  it('uses the final slot for an independent recovered publisher', async () => {
+    const existing = Array.from({ length: 4 }, (_, i) => digestItem({
+      source: 'Guardian World',
+      link: `https://theguardian.com/sudan-${i}`,
+      publishedAt: 1_700_000_000_000,
+    }));
+    const duplicatePublisher = digestItem({ source: 'Guardian Africa', link: 'https://theguardian.com/sudan-more' });
+    const independent = digestItem({ source: 'BBC News', link: 'https://bbc.com/sudan-report', publishedAt: Date.now() - 2 * 3600_000 });
+    stubFetch({ digestItems: existing, countryHeadlines: { SD: { items: [duplicatePublisher, independent] } } });
+    const { snapshot } = await runFreeze({ serviceKey: '' });
+    const rows = snapshot.countries.SD.developments.headlines;
+    assert.equal(rows.length, 5);
+    assert.deepEqual(rows.slice(0, 4).map(row => row.url), existing.map(row => row.link));
+    assert.equal(rows[4].source, 'BBC News');
+    assert.equal(briefGroundingGap(rows), null);
+  });
+
+  it('retains digest reporting and records a failed curated-cache capture explicitly', async () => {
+    stubFetch({ digestItems: countryDigestItems(), countryHeadlineState: 'fail' });
+    const { snapshot } = await runFreeze({ serviceKey: '' });
+    assert.ok(snapshot.countries.SD.developments.headlines.length > 0);
+    assert.equal(snapshot.coverage.developmentsCuratedFeeds.state, 'unavailable');
+    assert.equal(snapshot.coverage.developmentsCuratedFeeds.recoveredCountryCount, 0);
+    assert.ok(snapshot.errors.developments.some(error => error.stage === 'curated-feeds'));
+  });
+
+  it('ignores unavailable and wrong-country responses without upgrading provenance', async () => {
+    stubFetch({
+      countryHeadlineState: 'unavailable',
+      countryHeadlines: { PW: { items: [digestItem({ title: 'Palau signs a pact' })] } },
+    });
+    const unavailable = await runFreeze();
+    assert.equal(unavailable.snapshot.countries.PW.developments.headlines.length, 0);
+    stubFetch({ countryHeadlines: { PW: { items: [digestItem({ title: 'Sudan signs a pact' })] } } });
+    const mismatched = await runFreeze();
+    assert.equal(mismatched.snapshot.countries.PW.developments.headlines.length, 0);
+  });
+
   it('pools every digest variant for country matching and de-duplicates by URL', async () => {
     const requested = [];
     const [sudanLead] = countryDigestItems();
@@ -1851,5 +1948,118 @@ describe('committed live pulse scorecard sections', () => {
         assert.ok(state.ageHours >= 0, `${relativePath} must not measure a negative age`);
       }
     }
+  });
+});
+
+// One wire story reaches the flattened strip selection through several of a
+// publisher's regional feeds. server/worldmonitor/news/v1/_feeds.ts registers
+// France 24's four editions under four different categories, so on 2026-09-14
+// "France 24" (europe) and "France 24 LatAm" (latam) both carried the same
+// article with a byte-identical link, and two of the homepage's four rows went
+// to one story (#8339).
+describe('strip headline article identity (#8339)', () => {
+  const SHARED_URL = 'https://www.france24.com/en/americas/20260914-us-g20-energy-talks-iran-war';
+
+  function digest(entries) {
+    return {
+      categories: Object.fromEntries(
+        entries.map((entry, index) => [`cat${index}`, { items: [entry] }]),
+      ),
+    };
+  }
+
+  function item(overrides = {}) {
+    return {
+      title: 'US hosts G20 energy talks in Texas as Iran war disrupts global fuel markets',
+      source: 'France 24',
+      link: SHARED_URL,
+      publishedAt: Date.parse('2026-09-14T01:42:29.000Z'),
+      importanceScore: 50,
+      ...overrides,
+    };
+  }
+
+  it('publishes one row per article when editions repeat across categories', () => {
+    const { rows, rejections } = selectFrozenHeadlines(digest([
+      item({ source: 'France 24', importanceScore: 60 }),
+      item({ source: 'France 24 LatAm', importanceScore: 55 }),
+    ]), 4);
+
+    assert.equal(rows.length, 1, 'the same article must not occupy two of the four rows');
+    assert.equal(rows[0].source, 'France 24', 'the best-ranked edition survives');
+    assert.equal(rejections.duplicateUrl, 1);
+  });
+
+  it('promotes the next distinct story into the slot a duplicate would have taken', () => {
+    const { rows } = selectFrozenHeadlines(digest([
+      item({ source: 'France 24', importanceScore: 60 }),
+      item({ source: 'France 24 LatAm', importanceScore: 55 }),
+      item({ title: 'A second distinct story', link: 'https://example.com/b', importanceScore: 10 }),
+    ]), 2);
+
+    assert.deepEqual(
+      rows.map((row) => row.title),
+      [
+        'US hosts G20 energy talks in Texas as Iran war disrupts global fuel markets',
+        'A second distinct story',
+      ],
+      'deduping before the cap must fill the freed slot, not ship a short strip',
+    );
+  });
+
+  it('keeps locale editions that are genuinely different documents', () => {
+    const { rows } = selectFrozenHeadlines(digest([
+      item({ link: 'https://www.france24.com/en/americas/20260914-story' }),
+      item({ source: 'France 24 LatAm', link: 'https://www.france24.com/es/americas/20260914-story' }),
+    ]), 4);
+
+    assert.equal(rows.length, 2, 'two locale paths are two documents; collapsing them would lose coverage');
+  });
+
+  it('treats a tracking parameter as the same article but a content parameter as another', () => {
+    assert.equal(
+      normalizeArticleUrl('https://example.com/a?utm_source=x&gclid=y'),
+      normalizeArticleUrl('https://example.com/a'),
+    );
+    assert.notEqual(
+      normalizeArticleUrl('https://example.com/a?id=1'),
+      normalizeArticleUrl('https://example.com/a?id=2'),
+    );
+  });
+
+  it('strips a trailing path slash whether or not a query follows it', () => {
+    // Stripping it off the serialized string only works when there is no
+    // query: 'a/?id=1' does not end in '/', so the same document normalized
+    // two ways as soon as a content parameter was present.
+    assert.equal(
+      normalizeArticleUrl('https://example.com/a/'),
+      normalizeArticleUrl('https://example.com/a'),
+    );
+    assert.equal(
+      normalizeArticleUrl('https://example.com/a/?id=1'),
+      normalizeArticleUrl('https://example.com/a?id=1'),
+    );
+    assert.equal(
+      normalizeArticleUrl('https://example.com/a/b/?id=1&utm_source=x'),
+      normalizeArticleUrl('https://example.com/a/b?id=1'),
+    );
+    // The root path is a single '/' and is not a segment to strip.
+    assert.equal(normalizeArticleUrl('https://example.com/'), normalizeArticleUrl('https://example.com'));
+  });
+
+  it('never merges rows whose URL cannot be compared', () => {
+    const rows = [{ url: 'not a url' }, { url: 'not a url' }, { url: '' }];
+    assert.equal(dedupeByArticleUrl(rows, (row) => row.url).length, 3);
+    assert.deepEqual(duplicateArticleUrls(rows, (row) => row.url), []);
+  });
+
+  it('reports a repeated article so the snapshot can refuse to publish it', () => {
+    assert.deepEqual(
+      duplicateArticleUrls(
+        [{ url: SHARED_URL }, { url: `${SHARED_URL}?utm_medium=rss` }, { url: 'https://example.com/b' }],
+        (row) => row.url,
+      ),
+      [SHARED_URL],
+    );
   });
 });

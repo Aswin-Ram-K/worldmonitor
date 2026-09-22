@@ -17,6 +17,7 @@ async function loop(input, tier = 'basic', transport = null) {
   const fetches = [];
   const context = {
     module: { exports: {} }, URL, AbortSignal, console, buildWidgetDataUrl,
+    WIDGET_MAX_TOOL_CALLS: 3,
     requireWidgetAgentAccess: () => ({ anthropicConfigured: true, admittedAs: tier }),
     readRequestBody: async () => JSON.stringify({ prompt: 'Build a market widget', tier }),
     safeEnd: () => { throw Error('unexpected early rejection'); },

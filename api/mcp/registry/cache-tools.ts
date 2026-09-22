@@ -1,4 +1,5 @@
 import ISO2_TO_ISO3 from '../../../shared/iso2-to-iso3.js';
+import { normalizeSocialVelocity } from '../../_social-velocity.js';
 import { CHINA_MACRO_REQUIRED_SERIES } from '../../../shared/china-macro-contract.js';
 import {
   normalizeChinaMacroObservations,
@@ -73,6 +74,20 @@ function resolveEurostatCountryFilter(raw: unknown): string[] {
     if (geo === 'ea20' || geo === 'eu27_2020') return [geo];
     return resolveCountryFilter(value, 'countries').map((code) => code === 'gr' ? 'el' : code);
   });
+}
+
+// The UNHCR seeder stores `{ summary: { year, globalTotals, countries, topFlows } }`.
+// executeTool then files that value under the cache-key label `summary`, so the
+// lists live at `data.summary.summary.*`. Hoist the inner object so `limit`,
+// `countries`, and `summary: true` reach the arrays the outputSchema describes.
+function hoistDisplacementSeed(data: Record<string, unknown>): void {
+  const outer = data.summary;
+  if (!outer || typeof outer !== 'object' || Array.isArray(outer)) return;
+  const inner = (outer as Record<string, unknown>).summary;
+  if (!inner || typeof inner !== 'object' || Array.isArray(inner)) return;
+  const seeded = inner as Record<string, unknown>;
+  if (!Array.isArray(seeded.countries) && !Array.isArray(seeded.topFlows)) return;
+  data.summary = seeded;
 }
 
 // Iran-events domain sunset (war ended 2026-07). Default OFF: drop the dormant
@@ -1016,7 +1031,9 @@ export const CACHE_TOOLS: ToolDef[] = [
         properties: {
           topStories: { type: 'array', items: { type: 'object', properties: {
             primaryTitle: { type: 'string' }, primarySource: { type: 'string' }, primaryLink: { type: 'string' },
-            pubDate: { type: 'string' }, sourceCount: { type: 'number' }, importanceScore: { type: 'number' },
+            // Epoch milliseconds from the digest pipeline, or an ISO string when a
+            // feed item carried only a text date (scripts/seed-insights.mjs).
+            pubDate: { type: ['string', 'number'] }, sourceCount: { type: 'number' }, importanceScore: { type: 'number' },
             credibilityScore: { type: 'number', description: '0-100 source-reliability score, distinct from importanceScore. Built from source tier, propaganda risk, and independent corroboration. State-controlled media is capped at 40.' },
             // Corroboration and clustering fields the seeder already writes
             // into every news:insights:v1 topStories entry (see the object
@@ -1296,7 +1313,7 @@ export const CACHE_TOOLS: ToolDef[] = [
         min_severity: {
           type: 'string',
           enum: ['low', 'medium', 'high', 'critical'],
-          description: 'Drop threats below this severity level.',
+          description: 'Keep only threats with a known severity at or above this level; exclude missing or unrecognized severities.',
         },
         country: { type: 'string', description: 'Filter to one ISO 3166-1 alpha-2 country code (many threats have no country and are dropped by this filter). Country names and alpha-3 codes are accepted; unresolved inputs return Invalid params.' },
         limit: { type: 'number', description: 'Cap the threat list to at most this many items (default 30, pass 0 for no cap).' },
@@ -1329,7 +1346,7 @@ export const CACHE_TOOLS: ToolDef[] = [
         narrowNested(data, 'threats-bootstrap', 'threats', (t) => {
           const tok = argStr(t.severity).replace('criticality_level_', '');
           const r = ranks[tok];
-          return r == null || r >= minRank;
+          return r != null && r >= minRank;
         });
       }
       capNested(data, 'threats-bootstrap', 'threats', (argNum(params.limit) ?? DEFAULT_LIST_LIMIT));
@@ -1772,6 +1789,7 @@ export const CACHE_TOOLS: ToolDef[] = [
   },
   {
     name: 'get_sanctions_data',
+    _subscriptionOnly: true,
     _outputBudgetBytes: 131072,
     description: 'OFAC SDN sanctioned entities list and sanctions pressure scores by country. Useful for compliance screening and geopolitical pressure analysis.',
     inputSchema: {
@@ -1791,7 +1809,8 @@ export const CACHE_TOOLS: ToolDef[] = [
       entities: {
         type: ['array', 'object', 'null'],
         items: { type: 'object', properties: {
-          name: { type: 'string' }, cc: { type: 'string' }, et: { type: 'string' },
+          // Up to three ISO country codes per entity (scripts/seed-sanctions-pressure.mjs).
+          name: { type: 'string' }, cc: { type: 'array', items: { type: 'string' } }, et: { type: 'string' },
           addr: { type: 'string' },
         } },
       },
@@ -1854,17 +1873,30 @@ export const CACHE_TOOLS: ToolDef[] = [
       summary: {
         type: ['object', 'null'],
         properties: {
+          year: { type: 'number' },
+          globalTotals: { type: 'object', properties: {
+            refugees: { type: 'number' }, asylumSeekers: { type: 'number' }, idps: { type: 'number' },
+            stateless: { type: 'number' }, total: { type: 'number' },
+          } },
           countries: { type: 'array', items: { type: 'object', properties: {
-            code: { type: 'string' }, total: { type: ['number', 'null'] }, year: { type: ['number', 'string'] },
+            code: { type: 'string' }, name: { type: 'string' },
+            refugees: { type: 'number' }, asylumSeekers: { type: 'number' }, idps: { type: 'number' },
+            stateless: { type: 'number' }, totalDisplaced: { type: 'number' },
+            hostRefugees: { type: 'number' }, hostAsylumSeekers: { type: 'number' }, hostTotal: { type: 'number' },
+            location: { type: 'object', properties: { latitude: { type: 'number' }, longitude: { type: 'number' } } },
           } } },
           topFlows: { type: 'array', items: { type: 'object', properties: {
-            originCode: { type: 'string' }, asylumCode: { type: 'string' }, value: { type: ['number', 'null'] },
+            originCode: { type: 'string' }, originName: { type: 'string' },
+            asylumCode: { type: 'string' }, asylumName: { type: 'string' }, refugees: { type: 'number' },
+            originLocation: { type: 'object', properties: { latitude: { type: 'number' }, longitude: { type: 'number' } } },
+            asylumLocation: { type: 'object', properties: { latitude: { type: 'number' }, longitude: { type: 'number' } } },
           } } },
         },
       },
     }),
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     _postFilter: (data, params) => {
+      hoistDisplacementSeed(data);
       const countries = resolveCountryFilter(params.countries, 'countries');
       const codes = [...countries, ...compact(countries.map((code) => ISO2_TO_ISO3[code.toUpperCase()]?.toLowerCase()))];
       const limit = (argNum(params.limit) ?? DEFAULT_LIST_LIMIT);
@@ -2895,6 +2927,7 @@ export const CACHE_TOOLS: ToolDef[] = [
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     _postFilter: (data, params) => {
       const sub = argStr(params.subreddit);
+      if (data.reddit != null) data.reddit = normalizeSocialVelocity(data.reddit);
       if (sub) narrowNested(data, 'reddit', 'posts', (p) => argStr(p.subreddit) === sub);
       capNested(data, 'reddit', 'posts', (argNum(params.limit) ?? DEFAULT_LIST_LIMIT));
       return data;

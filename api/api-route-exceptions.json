@@ -248,6 +248,13 @@
       "removal_issue": null
     },
     {
+      "path": "api/mcp/structured-content.ts",
+      "category": "external-protocol",
+      "reason": "MCP tools/call structuredContent builder + the anyOf outputSchema it is advertised under (#8328). Pure helper imported by the MCP dispatcher and registry, not a route; same external-protocol constraint as the parent shim.",
+      "owner": "@koala73",
+      "removal_issue": null
+    },
+    {
       "path": "api/mcp/types.ts",
       "category": "external-protocol",
       "reason": "MCP shared type declarations (McpAuthContext, McpHandlerDeps, ToolDef union, etc.). Pure types — no runtime behaviour — but lives under api/mcp/ so the contract script requires a listing.",
@@ -646,6 +653,13 @@
       "path": "api/notify.ts",
       "category": "internal-helper",
       "reason": "Authenticated PRO event-publish endpoint that validates Clerk bearer auth, rejects relay-internal control events, and enqueues accepted events outside sebuf because it is queue plumbing rather than a typed domain RPC.",
+      "owner": "@SebastienMelki",
+      "removal_issue": null
+    },
+    {
+      "path": "api/notification-suppressions.js",
+      "category": "internal-helper",
+      "reason": "Anonymous operator incident-control read for the service worker: serves the Redis notification link-suppression set (blocked URLs/hosts) so already-delivered push payloads stop navigating on click. Kept outside sebuf because the SW consults it via a plain GET with no auth context at click time, and the shape is an unversioned incident snapshot rather than a typed domain RPC.",
       "owner": "@SebastienMelki",
       "removal_issue": null
     },

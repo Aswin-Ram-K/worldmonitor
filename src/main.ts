@@ -3,14 +3,14 @@ import './bootstrap/zod-csp';
 import { SITE_VARIANT } from '@/config/variant';
 import { installLcpAttributionDebug } from '@/bootstrap/lcp-attribution';
 import { markLcpDebug } from '@/utils/lcp-debug';
+import { registerWebMcpTools, type WebMcpAppBindings } from '@/services/webmcp';
 import { safeStorageGet, safeStorageRemove, safeStorageSet } from '@/utils/safe-storage';
 import { enqueueSentryCall, installPreInitErrorQueue, scheduleSentryInit } from '@/bootstrap/sentry-defer';
 import { registerClsReporting } from '@/bootstrap/cls-report';
 import { registerInpReporting } from '@/bootstrap/inp-report';
 import { registerLcpReporting } from '@/bootstrap/lcp-report';
-import { initVercelAnalytics } from '@/bootstrap/secondary-startup';
+import { initVercelAnalytics, stripSensitiveParamsFromUrl } from '@/bootstrap/secondary-startup';
 import { loadVariantThemeStylesheet } from '@/bootstrap/variant-theme';
-import { App } from './App';
 import { installUtmInterceptor } from './utils/utm';
 import { captureContentAttributionFromUrl } from '../shared/content-attribution';
 
@@ -283,8 +283,8 @@ function shouldSuppressCspViolation(
       // `div.show` — an origin-only frame (no path) that appears nowhere in our
       // source, repeated across many users over months. The injector is not
       // identified, but it does not need to be: frame-src is a BOUNDED
-      // allowlist — named hosts plus five vendor wildcard subdomains
-      // (*.clerk.accounts.dev, *.vercel.app, *.dodopayments.com and two more) —
+      // allowlist — named hosts plus four vendor wildcard subdomains
+      // (*.clerk.accounts.dev, *.dodopayments.com and two more) —
       // and div.show falls under none of them, so it can only have been framed
       // into the page from outside. That safety argument depends on frame-src
       // staying bounded — pinned by "CSP frame-src stays a bounded host
@@ -319,6 +319,18 @@ function shouldSuppressCspViolation(
   if (/manifest\.webmanifest$/.test(blockedURI)) return true;
   // Third-party injectors: Google Translate, Facebook Pixel.
   if (/gstatic\.com\/_\/translate/.test(blockedURI) || /facebook\.net/.test(blockedURI)) return true;
+  // Meta Pixel's form-post beacon. An injected server-side GTM tag (stape.io
+  // collect breadcrumbs) submitted a form to https://www.facebook.com/tr/
+  // (WORLDMONITOR-12G: 23 events from one user). The app ships no Meta Pixel,
+  // and the dashboard's form-action admits only 'self' and api.worldmonitor.app,
+  // so the post is never ours. Exact host, /tr path and form-action only: other
+  // facebook.com form targets and /tr under other directives still report.
+  if (directive === 'form-action') {
+    try {
+      const url = new URL(blockedURI);
+      if (url.protocol === 'https:' && url.host === 'www.facebook.com' && /^\/tr\/?$/.test(url.pathname)) return true;
+    } catch { /* scheme-only values fall through */ }
+  }
   // ---- font-src: one invariant, not a host list.
   //
   // The app ships `font-src 'self' data:` (vercel.json, the catch-all route that
@@ -552,6 +564,9 @@ if (capturedContentAttribution) {
   // reload does not duplicate the landing handoff.
   trackContentHandoff();
 }
+// Drop unread secrets (email, license_key) from the live URL before any
+// telemetry vendor initializes.
+stripSensitiveParamsFromUrl();
 void initAnalytics();
 initVercelAnalytics();
 initDebugBearRum();
@@ -624,26 +639,41 @@ if (urlParams.get('settings') === '1') {
   );
 } else {
   installUtmInterceptor();
-  markLcpDebug('wm:boot:app-construct');
-  const app = new App('app');
-  app
-    .init()
-    .then(() => {
-      clearChunkReloadGuard(chunkReloadStorageKey);
-    })
-    .catch((error: unknown) => {
-      console.error(error);
-      try {
-        // init() registers WebMCP before its first await. A failed boot must
-        // therefore run normal teardown so the browser cannot retain tools
-        // bound to an App that will never become ready.
-        app.destroy();
-      } catch (cleanupError) {
-        // Cleanup is best-effort on a partially initialised App; never replace
-        // the original boot failure with an unhandled teardown rejection.
-        console.error('[App] Failed to clean up after initialization failure:', cleanupError);
-      }
-    });
+  let resolveBindings!: (bindings: WebMcpAppBindings) => void;
+  let rejectBindings!: (error: unknown) => void;
+  const bindings = new Promise<WebMcpAppBindings>((resolve, reject) => {
+    resolveBindings = resolve;
+    rejectBindings = reject;
+  });
+  const webMcpController = registerWebMcpTools(bindings);
+  // Import and constructor failures must reach the global startup error monitors.
+  void import('./App').then(({ App }) => {
+    markLcpDebug('wm:boot:app-construct');
+    const app = new App('app');
+    resolveBindings(app.getWebMcpBindings());
+    app
+      .init(webMcpController)
+      .then(() => {
+        clearChunkReloadGuard(chunkReloadStorageKey);
+      })
+      .catch((error: unknown) => {
+        console.error(error);
+        try {
+          // init() owns the WebMCP controller before its first await. A failed
+          // boot must run normal teardown so the browser cannot retain tools
+          // bound to an App that will never become ready.
+          app.destroy();
+        } catch (cleanupError) {
+          // Cleanup is best-effort on a partially initialised App; never replace
+          // the original boot failure with an unhandled teardown rejection.
+          console.error('[App] Failed to clean up after initialization failure:', cleanupError);
+        }
+      });
+  }).catch((error: unknown) => {
+    rejectBindings(error);
+    webMcpController?.abort();
+    throw error;
+  });
 }
 
 // Debug helpers for geo-convergence testing (remove in production)

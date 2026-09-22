@@ -62,6 +62,12 @@ test('canonical equivalents share bounded hashed cache identity', async () => {
   assert.match(keys[0]!, /^aviation:gf:[a-f0-9]{64}:v2$/);
   assert.equal(redis.expires.get(keys[0]!), 600);
 });
+test('fractional passenger counts share the integer relay query and cache entry', async () => {
+  await read({ passengers: 1.9 });
+  await read({ passengers: 1 });
+  assert.equal(feeds().length, 1);
+  assert.equal(feeds()[0]!.searchParams.get('passengers'), '1');
+});
 test('ordinary gateway rejects bad input and store outages without upstream work', async () => {
   assert.equal((await gateway(request({ origin: 'TOOLONG' }))).status, 400);
   assert.equal(feeds().length, 0);
@@ -327,13 +333,26 @@ test('upstream failure remains degraded and is not cached as a successful search
     const failed = await read();
     assert.equal(failed.degraded, true);
     assert.deepEqual(failed.flights, []);
-    assert.equal((await read()).degraded, true);
-    assert.equal(attempts, 1, 'existing short negative cache prevents a retry storm');
-    now += 30_001;
     assert.equal((await read()).degraded, false);
-    await read();
     assert.equal(attempts, 2);
   } finally {
     Date.now = realNow;
   }
+});
+
+test('provider cooldown remains degraded and is never stored as a healthy empty search', async () => {
+  let attempts = 0;
+  globalThis.fetch = (async (input, init) => {
+    const url = new URL(String(input));
+    if (url.hostname === 'redis.example') return redis.fetchImpl(input, init);
+    attempts++;
+    return Response.json({ flights: [], cooldown: true, error: 'provider cooldown' });
+  }) as typeof fetch;
+
+  const first = await read();
+  const second = await read();
+  assert.deepEqual(first, { flights: [], degraded: true, error: 'provider cooldown' });
+  assert.deepEqual(second, { flights: [], degraded: true, error: 'provider cooldown' });
+  assert.equal(attempts, 2, 'cooldown must not be cached as a successful empty result');
+  assert.equal([...redis.redis.keys()].filter(key => key.startsWith('aviation:gf:')).length, 0);
 });

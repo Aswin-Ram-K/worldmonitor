@@ -15,11 +15,13 @@
  * Containment: the browser tests the loaded country polygon and falls back to a
  * hand-tuned box; the server has no polygon, so it uses the generated
  * shared/country-bboxes.js box for every country. That is reported to the
- * caller in the response's `containment` field rather than hidden.
+ * caller in the response's `containment` field rather than hidden. Recognized
+ * protest country labels take precedence over this approximate geometry.
  */
 
-import COUNTRY_BBOXES from '../../../../shared/country-bboxes.js';
+import { countryBox, inBox, splitCountryBox, type CountryBox } from '../../../../shared/country-bbox';
 import { resolveCountryCode } from '../../../../shared/country-code-resolve';
+import { countryMentionTerms, mentionsCountry } from '../../../../shared/country-mention.js';
 import type {
   CountryTimelineIncident,
   CountryTimelineSeverity,
@@ -87,30 +89,6 @@ const STALE_AFTER_MS: Record<string, number> = {
 
 /** Bound on the flights pagination walk, so a misbehaving cursor cannot spin. */
 const MAX_FLIGHT_PAGES = 10;
-
-export interface CountryBox {
-  south: number;
-  west: number;
-  north: number;
-  east: number;
-}
-
-/** shared/country-bboxes.js stores [south_lat, west_lon, north_lat, east_lon]. */
-export function countryBox(code: string): CountryBox | null {
-  const bbox = COUNTRY_BBOXES[code.toUpperCase()];
-  if (!bbox) return null;
-  const [south, west, north, east] = bbox;
-  return { south, west, north, east };
-}
-
-export function inBox(
-  box: CountryBox | null,
-  lat: number | undefined,
-  lon: number | undefined,
-): boolean {
-  if (!box || !Number.isFinite(lat) || !Number.isFinite(lon)) return false;
-  return lat! >= box.south && lat! <= box.north && lon! >= box.west && lon! <= box.east;
-}
 
 export interface SeedRead {
   /** 'hit' the key exists, 'miss' it does not, 'error' the read itself failed. */
@@ -293,9 +271,7 @@ async function collectProtests(req: StructuredRequest, box: CountryBox | null): 
   const deps = req.deps ?? defaultStructuredDependencies;
   try {
     const [response, seed] = await Promise.all([
-      // country: '' — the seed's own filter is a name substring match, which
-      // would miss an event geolocated inside the country but labelled with a
-      // neighbouring one. Filter here instead, the way the panel does.
+      // Resolve exact country identities here; the seed only offers substring matching.
       deps.listUnrestEvents(req.ctx, {
         country: '',
         start: 0,
@@ -313,8 +289,10 @@ async function collectProtests(req: StructuredRequest, box: CountryBox | null): 
     const countryLower = req.countryName.toLowerCase();
     const incidents: CountryTimelineIncident[] = [];
     for (const event of response.events) {
-      const matches = event.country?.toLowerCase() === countryLower
-        || inBox(box, event.location?.latitude, event.location?.longitude);
+      const eventCode = resolveCountryCode(event.country);
+      const matches = eventCode ? eventCode === req.code.toUpperCase()
+        : event.country?.toLowerCase() === countryLower
+          || inBox(box, event.location?.latitude, event.location?.longitude);
       if (!matches) continue;
       if (!Number.isFinite(event.occurredAt) || event.occurredAt < req.cutoffMs) continue;
       incidents.push({
@@ -339,11 +317,31 @@ async function collectEarthquakes(req: StructuredRequest, box: CountryBox | null
       deps.listEarthquakes(req.ctx, { start: 0, end: 0, pageSize: 0, cursor: '', minMagnitude: 0 }),
       deps.readSeed(SEED_KEYS[source]!),
     ]);
-    const countryLower = req.countryName.toLowerCase();
+    // Word-boundary matching via the shared country-mention matcher: a
+    // substring test attributes foreign quakes to the wrong country (Nigeria
+    // to Niger, Somalia to Mali, Romania to Oman, Indiana to India, South
+    // Sudan to Sudan). The shared matcher also scrubs known superstring
+    // exclusions (South Sudan vs Sudan, Guinea variants) before matching.
+    //
+    // Demonyms are dropped for this call site. The shared matcher is tuned for
+    // NEWS PROSE, where "Dutch" or "Spanish" is a strong country signal; a USGS
+    // `place` is a geographic label, where it is not — "Dutch Harbor, Alaska"
+    // would ground the Netherlands, "Spanish Fork, Utah" Spain, and
+    // "Philippine Sea" / "Norwegian Sea" their respective countries. Place
+    // strings name the country or state outright, so the demonym arm only adds
+    // false positives here.
+    //
+    // NOT closed by this: an EXACT collision between a country name and a US
+    // state, i.e. "Georgia". Word boundaries cannot separate those two — the
+    // token is identical — and shared/country-mention.js has no GE exclusion
+    // (it likewise omits the "Georgian" demonym for the same ambiguity). A
+    // quake in Atlanta still matches GE on the name arm; only the bbox test
+    // distinguishes them.
+    const mentionTerms = { ...countryMentionTerms(req.code), demonyms: [] };
     const incidents: CountryTimelineIncident[] = [];
     for (const quake of response.earthquakes) {
       const matches = inBox(box, quake.location?.latitude, quake.location?.longitude)
-        || quake.place?.toLowerCase().includes(countryLower) === true;
+        || (typeof quake.place === 'string' && mentionsCountry(quake.place, mentionTerms));
       if (!matches) continue;
       if (!Number.isFinite(quake.occurredAt) || quake.occurredAt < req.cutoffMs) continue;
       incidents.push({
@@ -404,37 +402,42 @@ async function collectMilitaryFlights(
 ): Promise<StructuredSourceResult> {
   const source = 'structured:military-flights';
   const deps = req.deps ?? defaultStructuredDependencies;
-  if (!box) {
-    return unavailable(source, `No bounding box for ${req.code}; military flights are matched geographically only.`);
+  const queryBoxes = box ? splitCountryBox(box) : [];
+  if (!queryBoxes.length) {
+    return unavailable(source, `No usable flight bounding box for ${req.code}; military flights are matched geographically only.`);
   }
   try {
     // The server bounds every flights response to a page, and the browser
     // follows next_cursor to reassemble the region (military-flights.ts
     // fetchViaProto). Reading only page one would drop military-lane incidents
     // for exactly the busy countries where the lane matters most.
-    const flights: MilitaryFlight[] = [];
-    let cursor = '';
-    for (let page = 0; page < MAX_FLIGHT_PAGES; page++) {
-      const response = await deps.listMilitaryFlights(req.ctx, {
-        pageSize: 0,
-        cursor,
-        neLat: box.north,
-        neLon: box.east,
-        swLat: box.south,
-        swLon: box.west,
-        operator: 'MILITARY_OPERATOR_UNSPECIFIED',
-        aircraftType: 'MILITARY_AIRCRAFT_TYPE_UNSPECIFIED',
-      });
-      flights.push(...response.flights);
-      const next = response.pagination?.nextCursor ?? '';
-      if (!next) break;
-      if (next === cursor || page === MAX_FLIGHT_PAGES - 1) {
-        return failed(source, 'Military flight pagination was incomplete; this is not evidence of a quiet period.');
+    const flights = new Map<string, MilitaryFlight>();
+    for (const bounds of queryBoxes) {
+      let cursor = '';
+      for (let page = 0; page < MAX_FLIGHT_PAGES; page++) {
+        const response = await deps.listMilitaryFlights(req.ctx, {
+          pageSize: 0,
+          cursor,
+          neLat: bounds.north,
+          neLon: bounds.east,
+          swLat: bounds.south,
+          swLon: bounds.west,
+          operator: 'MILITARY_OPERATOR_UNSPECIFIED',
+          aircraftType: 'MILITARY_AIRCRAFT_TYPE_UNSPECIFIED',
+        });
+        for (const flight of response.flights) {
+          if (inBox(box, flight.location?.latitude, flight.location?.longitude)) flights.set(flight.id, flight);
+        }
+        const next = response.pagination?.nextCursor ?? '';
+        if (!next) break;
+        if (next === cursor || page === MAX_FLIGHT_PAGES - 1) {
+          return failed(source, 'Military flight pagination was incomplete; this is not evidence of a quiet period.');
+        }
+        cursor = next;
       }
-      cursor = next;
     }
     const incidents: CountryTimelineIncident[] = [];
-    for (const flight of flights) {
+    for (const flight of flights.values()) {
       if (!Number.isFinite(flight.lastSeenAt) || flight.lastSeenAt < req.cutoffMs) continue;
       incidents.push({
         timestamp: flight.lastSeenAt,
@@ -448,7 +451,7 @@ async function collectMilitaryFlights(
     // would read as "gathered then", which is a different fact.
     // Rows in the bbox prove the flights path answered. An empty bbox cannot:
     // a quiet country and a dead upstream look identical through this query.
-    const settled = settle(source, incidents, { status: 'hit', fetchedAtMs: 0 }, req.now, flights.length > 0);
+    const settled = settle(source, incidents, { status: 'hit', fetchedAtMs: 0 }, req.now, flights.size > 0);
     // One bounded, one-directional divergence from the panel, stated rather
     // than hidden: the browser enriches flights with Wingbits aircraft details
     // after the RPC (military-flights.ts enrichFlightsWithWingbits), and a

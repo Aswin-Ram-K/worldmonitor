@@ -367,7 +367,6 @@ const getCspDirectiveTokens = (csp, directive) => {
 // scheme-wide source is flagged while the known ones stay quiet.
 const KNOWN_FRAME_WILDCARDS = [
   'https://*.clerk.accounts.dev',
-  'https://*.vercel.app',
   'https://*.dodopayments.com',
   'https://*.hs.dodopayments.com',
   'https://*.custom.hs.dodopayments.com',
@@ -1302,6 +1301,27 @@ describe('welcome landing page routing', () => {
     }
   });
 
+  it('opens deployment and branch preview roots through the dashboard route', () => {
+    for (const host of [
+      'worldmonitor-h0zk88n4l-eliewm.vercel.app',
+      'worldmonitor-git-perf-defer-dashboard-app-eliewm.vercel.app',
+    ]) {
+      const redirect = firstRedirectFor({ host, path: '/' });
+      assert.equal(redirect?.destination, '/dashboard');
+      assert.equal(redirect.permanent, false);
+      assert.equal(firstRewriteFor({ host, path: redirect.destination })?.destination, DASHBOARD_HTML_DESTINATION);
+      assert.equal(firstRedirectFor({ host, path: '/', query: { mode: 'agent' } }), null);
+      assert.equal(firstRewriteFor({ host, path: '/', query: { mode: 'agent' } })?.destination, '/agent-view.json');
+    }
+  });
+
+  it('keeps preview root routing off production homepages, unknown pages, and lookalike hosts', () => {
+    for (const host of ['worldmonitor.app', 'www.worldmonitor.app', 'example.com', 'preview.vercel.app.evil.example']) {
+      assert.equal(firstRedirectFor({ host, path: '/' }), null);
+    }
+    assert.equal(firstRedirectFor({ host: 'preview.vercel.app', path: '/missing-page' }), null);
+  });
+
   it('keeps variant canonicals aligned with the /dashboard routing strategy', () => {
     const variantUrls = getVariantUrls();
     assert.equal(variantUrls.full, 'https://www.worldmonitor.app/dashboard');
@@ -1320,7 +1340,7 @@ describe('welcome landing page routing', () => {
   it('redirects legacy root map-state deep links to /dashboard before welcome routing', () => {
     assert.match(
       middlewareSource,
-      /LEGACY_DASHBOARD_ROOT_QUERY_KEYS = \['lat', 'lon', 'zoom', 'view', 'timeRange', 'layers'\]/,
+      /LEGACY_DASHBOARD_ROOT_QUERY_KEYS = \['lat', 'lon', 'zoom', 'view', 'timeRange', 'layers', 'c', 'country', 'chokepoint'\]/,
       'middleware must list dashboard URL-state params that bypass the root welcome page',
     );
     assert.match(
@@ -1795,7 +1815,8 @@ describe('welcome landing page routing', () => {
     // the redirect is decided from the live __session JWT alone.
     assert.ok(!welcomeApp.includes("import('./services/clerk')"));
     assert.ok(!welcomeApp.includes("import('./services/checkout')"));
-    assert.ok(welcomeApp.includes('maybeRedirectWelcomeVisitor(document.cookie, window.location)'));
+    assert.ok(welcomeApp.includes('maybeRedirectWelcomeVisitor(readDocumentCookie(), window.location)'));
+    assert.ok(welcomeApp.includes("import { readDocumentCookie } from './services/clerk-session'"));
   });
 });
 
@@ -2674,6 +2695,17 @@ describe('security header guardrails', () => {
     }
   });
 
+  it('CSP framing rejects unrelated Vercel projects while preserving same-origin previews and the toolbar', () => {
+    const csp = getHeaderValue('Content-Security-Policy');
+    for (const directive of ['frame-src', 'frame-ancestors']) {
+      const tokens = getCspDirectiveTokens(csp, directive);
+      assert.ok(tokens.includes("'self'"), `${directive} must allow same-origin preview frames`);
+      assert.ok(tokens.some((token) => token === 'https://vercel.live'), `${directive} must allow the Vercel toolbar`);
+      assert.ok(!tokens.includes('https://*.vercel.app'), `${directive} must not trust every Vercel team`);
+    }
+    assert.deepEqual(findOpenFrameSources(getCspDirectiveTokens(csp, 'frame-ancestors')), []);
+  });
+
   // Per-file assertions, so the built /pro pages drop out of the population
   // rather than taking the five committed files down with them (#6898).
   it('HTML entry script tags carry the nonce trusted by the header CSP', () => {
@@ -2786,6 +2818,7 @@ describe('security header guardrails', () => {
     // (`https://*.vercel.app`). It therefore passed while dead. Drive the
     // predicate directly against widenings written the way they'd really appear.
     for (const widened of [
+      'https://*.vercel.app', // arbitrary projects on other Vercel teams
       'https://*.evil.com',   // a new vendor wildcard
       'https://*',            // scheme-wide with a wildcard host
       'http://*.evil.com',
@@ -3471,11 +3504,14 @@ describe('agent readiness: MCP/OAuth origin alignment', () => {
       /resource_metadata="\$\{[A-Za-z_][A-Za-z0-9_]*\}"|`[^`]*resource_metadata="\$\{[^}]+\}"/,
       'api/mcp.ts must construct resource_metadata from a host-derived variable'
     );
-    // Must actually read the request host header somewhere in the file.
+    // Must derive the origin from the request, through the shared resolver that
+    // validates Host against the allowlist (api/_agent-metadata.ts). Reading the
+    // raw header directly would reflect a spoofed Host into the discovery
+    // pointer, and could name a host whose metadata document we never serve.
     assert.match(
       source,
-      /request\.headers\.get\(['"]host['"]\)|req\.headers\.get\(['"]host['"]\)/i,
-      'api/mcp.ts should read the request host header'
+      /resolveMetadataOrigin\(req(?:uest)?\)/,
+      'api/mcp.ts must derive the resource_metadata origin via resolveMetadataOrigin'
     );
   });
 
@@ -5451,15 +5487,12 @@ describe('cold-load metric evidence reaches the CI artifact (#7837)', () => {
     assert.match(testWorkflowSource, /path: test-results\//);
   });
 
-  // #7848 moved the readiness gate to first paint; #7837 added a settled
-  // sample beside it that is deliberately NOT asserted, because a slow runner
-  // must never redden this required job. Folding the settled sample into the
-  // budget assertion would reintroduce exactly the flake both issues exist to
-  // remove — visibly, but only after a live CI run.
-  it('asserts the dashboard budgets against the first-paint sample only', () => {
+  // #7867 gives the first-paint sample its own CI-derived budget. The settled
+  // diagnostic remains optional because hydration readiness is incomplete on CI.
+  it('asserts the first-paint budgets against the first-paint sample only', () => {
     assert.match(
       mapBudgetE2eSource,
-      /assertDashboardMetricBudgets\(samples\.map\(\(sample\) => sample\.firstPaint\.postGc\)\)/,
+      /assertDashboardMetricBudgets\(samples\.map\(\(sample\) => sample\.firstPaint\.postGc\), FIRST_PAINT_METRIC_BUDGETS\)/,
     );
     assert.doesNotMatch(
       mapBudgetE2eSource,

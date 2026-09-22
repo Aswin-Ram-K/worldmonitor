@@ -2,8 +2,8 @@
 // Freeze last-known-good crawlable live-pulse values for country risk,
 // chokepoint status, crisis HAPI summaries, the top news headlines,
 // the market tape, the forecast resolution scorecard published at /accuracy/, and
-// per-country recent developments (digest headlines matched per country,
-// topped up from the per-country GDELT article index where the digest
+// per-country recent developments (digest and cached RSS headlines matched per country,
+// topped up from the per-country GDELT article index where the curated pool
 // leaves a country short, plus the intel brief and timeline where a service
 // key unlocks the tier-gated routes). Writes
 // docs/snapshots/crawlable-live-pulse-<YYYY-MM-DD>.json.
@@ -34,6 +34,7 @@ import { loadEnvFile } from './_seed-utils.mjs';
 import {
   briefCitationGroundingGap,
   briefGroundingGap,
+  briefGroundingPublisherCount,
   COUNTRY_INDEX_ORIGIN,
   developmentsHasDatedItem,
   hasBriefGrounding,
@@ -44,6 +45,7 @@ import {
 import { countryIndexPath, topUpCountryIndex } from './crawlable-country-index.mjs';
 import { selectDeclaredScorecardFields } from './build-accuracy-page.mjs';
 import { countryMentionTerms, mentionsCountry } from '../shared/country-mention.js';
+import { dedupeByArticleUrl, duplicateArticleUrls } from '../shared/article-identity.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -569,7 +571,7 @@ function emptyDevelopments(freezeStartedAt, briefSkipped) {
 // would leave a shortfall with no recorded cause, since the request itself
 // succeeded -- the operator would see a count and no reason.
 export function selectFrozenHeadlines(payload, limit = HEADLINE_CAPTURE_COUNT) {
-  const rejections = { noTitle: 0, noSource: 0, unverifiableUrl: 0, noPublishedAt: 0 };
+  const rejections = { noTitle: 0, noSource: 0, unverifiableUrl: 0, noPublishedAt: 0, duplicateUrl: 0 };
   const categories = payload && typeof payload === 'object' ? payload.categories : null;
   if (!categories || typeof categories !== 'object') return { rows: [], rejections };
   const rows = Object.values(categories)
@@ -594,10 +596,16 @@ export function selectFrozenHeadlines(payload, limit = HEADLINE_CAPTURE_COUNT) {
       b.importanceScore - a.importanceScore
       || b.publishedAtMs - a.publishedAtMs
       || a.row.title.localeCompare(b.row.title)
-    ))
-    .slice(0, limit)
-    .map((entry) => entry.row);
-  return { rows, rejections };
+    ));
+
+  // Dedupe BEFORE the cap so a second edition of one story never occupies a
+  // slot the next distinct story could fill — the same ordering the digest uses
+  // for its own revoked-URL suppression. Ranked input means the surviving copy
+  // is the best-ranked one (#8339).
+  const deduped = dedupeByArticleUrl(rows, (entry) => entry.row.url);
+  rejections.duplicateUrl = rows.length - deduped.length;
+
+  return { rows: deduped.slice(0, limit).map((entry) => entry.row), rejections };
 }
 
 // Country matching is the shared matcher (shared/country-mention.js), the
@@ -1010,6 +1018,45 @@ export async function freezeCrawlableLivePulse({
     headlinesByCode.set(code, selectCountryHeadlines(digestItems, code, COUNTRY_HEADLINE_LIMIT));
   }
 
+  // Country reporting is useful even when it falls below the dashboard's
+  // category cap. Read the already-acquired RSS pool once before GDELT top-up.
+  const curatedFeeds = { state: 'unavailable', feedTotal: 0, feedCached: 0, recoveredCountryCount: 0, addedHeadlineCount: 0 };
+  const curatedFeedErrors = [];
+  const curatedFeedUrls = new Set();
+  try {
+    const query = new URLSearchParams();
+    for (const code of Object.keys(countries)) query.append('country_codes', code);
+    const payload = await authedGet(`/api/news/v1/list-country-headlines?${query}`, token, base, authOpts);
+    if (!['complete', 'partial', 'unavailable'].includes(payload?.state)
+      || !payload.countries || typeof payload.countries !== 'object') {
+      throw new Error('country headline response did not report cache coverage');
+    }
+    curatedFeeds.state = payload.state;
+    curatedFeeds.feedTotal = Number.isInteger(payload.feedTotal) ? payload.feedTotal : 0;
+    curatedFeeds.feedCached = Number.isInteger(payload.feedCached) ? payload.feedCached : 0;
+    if (payload.state === 'unavailable') throw new Error('country headline caches or revocation controls unavailable');
+    for (const code of Object.keys(countries)) {
+      const existing = headlinesByCode.get(code);
+      const candidates = selectCountryHeadlines(payload.countries[code]?.items, code)
+        .filter(row => !existing.some(headline => headline.url === row.url));
+      const rows = [];
+      while (existing.length + rows.length < COUNTRY_HEADLINE_LIMIT && candidates.length) {
+        const selected = [...existing, ...rows];
+        const publishers = briefGroundingPublisherCount(selected);
+        const independent = candidates.findIndex(row => briefGroundingPublisherCount([...selected, row]) > publishers);
+        rows.push(candidates.splice(Math.max(0, independent), 1)[0]);
+      }
+      if (rows.length === 0) continue;
+      if (existing.length === 0) curatedFeeds.recoveredCountryCount++;
+      curatedFeeds.addedHeadlineCount += rows.length;
+      for (const row of rows) curatedFeedUrls.add(row.url);
+      headlinesByCode.set(code, [...existing, ...rows]);
+    }
+  } catch (error) {
+    curatedFeedErrors.push({ code: '*', stage: 'curated-feeds', message: error instanceof Error ? error.message : String(error) });
+  }
+  await sleep(requestGapMs);
+
   // Per-country index top-up (#7748): every country the pool leaves short
   // asks the index; digest rows keep precedence and index rows fill the
   // remaining slots. The top-up is never a reason to lose the capture — its
@@ -1028,12 +1075,12 @@ export async function freezeCrawlableLivePulse({
 
   // Provenance cross-check (#7615): a brief source renders headline-grade on
   // the page, so its URL must have been in this run's frozen grounding pool —
-  // the pooled digest generation plus the index rows accepted above. The
-  // server re-grounds from its own live digest read at brief time; anything
-  // outside the pool (rotation, hallucination) rejects the entire brief
+  // the pooled digest, recovered RSS headlines and index rows accepted above.
+  // The brief request passes those rows as numbered Source lines; anything
+  // returned outside the pool rejects the entire brief
   // rather than being removed and shifting citation indexes. Both sides use
   // the same HTTPS-only URL serialization.
-  const groundingUrls = new Set(countryIndexUrls);
+  const groundingUrls = new Set([...countryIndexUrls, ...curatedFeedUrls]);
   for (const item of digestItems) {
     const url = normalizeHttpsUrl(item?.link);
     if (url) groundingUrls.add(url);
@@ -1142,7 +1189,7 @@ export async function freezeCrawlableLivePulse({
     }
     countries[code].developments = normalized;
   }
-  developmentsErrors.push(...digestVariantErrors, ...countryIndexErrors);
+  developmentsErrors.push(...digestVariantErrors, ...curatedFeedErrors, ...countryIndexErrors);
 
   // Forecast resolution scorecard (#6646), published at /accuracy/. Guarded and
   // never throwing, like every other step: a scoring outage must cost the page
@@ -1235,6 +1282,7 @@ export async function freezeCrawlableLivePulse({
         .filter((row) => !developmentsHasDatedItem(row.developments)).length,
       developmentsDigestVariants: digestVariantStates,
       developmentsDigestItemCount: digestItems.length,
+      developmentsCuratedFeeds: curatedFeeds,
       // The per-country index top-up (#7748): whether the route served,
       // how many countries were asked, and how many gained at least one
       // index row. The corpus build raises its coverage floor when the
@@ -1323,6 +1371,20 @@ export async function freezeCrawlableLivePulse({
     }
   }
 
+  // Strip invariant (#8339): the four published headlines must be four distinct
+  // articles. selectFrozenHeadlines already dedupes by normalized URL, so a
+  // duplicate here is a defect in that dedupe rather than an upstream
+  // condition, and it would put one story in two of the homepage's four rows.
+  // Unlike the coverage gates above this cannot be caused by a news outage, so
+  // it throws instead of recording a partial.
+  const duplicateHeadlineUrls = duplicateArticleUrls(snapshot.headlines, (row) => row?.url);
+  if (duplicateHeadlineUrls.length > 0) {
+    throw new Error(
+      `Pulse freeze selected ${snapshot.headlines.length} headlines carrying a repeated article: `
+      + `${duplicateHeadlineUrls.join(', ')}`,
+    );
+  }
+
   const basename = OUTPUT_BASENAME || `crawlable-live-pulse-${capturedAt}.json`;
   const outPath = path.join(rootDir, 'docs', 'snapshots', basename);
   await fs.writeFile(outPath, `${JSON.stringify(snapshot, null, 2)}\n`, 'utf8');
@@ -1349,6 +1411,9 @@ if (isMain) {
         + `developmentsCountries=${snapshot.coverage.developmentsCountryCount} `
         + `developmentsMissing=${snapshot.coverage.developmentsMissingCount} `
         + `digestPool=${snapshot.coverage.developmentsDigestItemCount} `
+        + `curatedFeeds=${snapshot.coverage.developmentsCuratedFeeds.state}`
+        + `:${snapshot.coverage.developmentsCuratedFeeds.feedCached}/${snapshot.coverage.developmentsCuratedFeeds.feedTotal} `
+        + `curatedRecovered=${snapshot.coverage.developmentsCuratedFeeds.recoveredCountryCount} `
         + `countryIndex=${snapshot.coverage.developmentsCountryIndex.state}`
         + `:${snapshot.coverage.developmentsCountryIndex.countryCount} `
         + `keyed=${snapshot.coverage.serviceKeyPresent} `

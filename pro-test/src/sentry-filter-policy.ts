@@ -345,6 +345,16 @@ export const MARKETING_IGNORE_ERRORS: RegExp[] = [
   // `!hasFirstParty` gate for exactly that reason), so only the WebAuthn
   // wording — which no first-party call site can reach — is suppressed here.
   /^(?:Error: )?NotSupportedError: The user agent does not support public key credentials\.$/,
+  // The same WebAuthn surface failing one step earlier. WORLDMONITOR-12H is the
+  // shape: `NotSupportedError: Error connecting to Web Authentication service.`
+  // on Chrome 152 / macOS at `/pro`, via `onunhandledrejection` with zero
+  // frames, breadcrumbs ending at Clerk's `POST /v1/client/sign_ins` after
+  // clicks on its identifier field. Chromium raises it when the platform
+  // authenticator service cannot be reached, which only a WebAuthn CALLER can
+  // hit. The WebAuthn-free scan that licenses the entry above pins that this
+  // surface has none, so the caller is Clerk's sign-in UI. Anchored to the whole
+  // sentence for the same reason: bare `NotSupportedError` stays reportable.
+  /^(?:Error: )?NotSupportedError: Error connecting to Web Authentication service\.$/,
   // The same WebAuthn surface as the entry above, reached from the other
   // direction: a SECOND credential request issued while one is still
   // outstanding. WORLDMONITOR-11T is the shape: `Error: OperationError: A
@@ -376,6 +386,23 @@ export const MARKETING_IGNORE_ERRORS: RegExp[] = [
   // already pending` would also drop a first-party message that merely CONTAINS
   // the phrase while riding a `/pro/assets/*.js` frame.
   /^(?:Error: )?OperationError: A request is already pending\.$/,
+  // Clerk's own SDK wrapping a failed fetch to its frontend API. The dashboard
+  // has carried `/ClerkJS: Network error/` for months; this surface runs a
+  // separate client and never got the entry, so WORLDMONITOR-12W leaked through
+  // it: `ClerkJS: Network error at "https://clerk.worldmonitor.app/v1/client/
+  // sign_ups/<id>/attempt_verification" - TypeError: Failed to fetch
+  // (clerk.worldmonitor.app). Please try again.` on Chrome 152 / Windows at
+  // `/pro`, via `onunhandledrejection`, every frame in `/pro/assets/clerk-*.js`.
+  // That frame is why the `MARKETING_NETWORK_NOISE` rule in `marketingBeforeSend`
+  // cannot catch it either: Clerk's chunk lives under `/pro/assets/`, so it
+  // counts as first-party there, and the value is an `Error`, not a `TypeError`.
+  //
+  // `ClerkJS:` is the SDK's own message prefix and appears in no `pro-test/src`
+  // file, no `shared/` leaf and neither inline script (pinned by
+  // tests/pro-sentry-filter-policy.test.mts), so the anchored prefix can only
+  // ever match Clerk. A user's flaky connection to Clerk is not actionable here;
+  // Clerk's UI already tells them to retry.
+  /^(?:Error: )?ClerkJS: Network error\b/,
 ];
 
 /** Sentry's own hashed SDK chunk — infrastructure, never evidence of our code. */
@@ -388,10 +415,19 @@ const BARE_SYMBOL_MESSAGE = /^[a-zA-Z_$]+$/;
  * Every browser phrasing for "a module failed to load or link". Chrome/Edge
  * `Failed to fetch dynamically imported module`, Safari `Importing a module
  * script failed.`, Firefox `error loading dynamically imported module`, and the
- * link-time counterpart `Importing binding name '<x>' is not found.`
+ * link-time counterpart in all three of its engine spellings: WebKit
+ * `Importing binding name '<x>' is not found.`, plus Gecko's and V8's
+ * `The requested module '<url>' does(n't| not) provide an export named …`.
+ *
+ * The dashboard carried only the WebKit spelling of that link failure and so
+ * reported V8's for months on a one-word difference (WORLDMONITOR-149); this
+ * surface never covered either wording. Bound by the runtime condition — a
+ * chunk importing a named export a sibling no longer provides after a deploy —
+ * rather than by one engine's wording, and stack-gated by its callers so a link
+ * failure attributable to this bundle still surfaces.
  */
 const MODULE_LOAD_FAILURE =
-  /(?:Failed to fetch|error loading) dynamically imported module|Importing a module script failed|Importing binding name '[^']*' is not found/i;
+  /(?:Failed to fetch|error loading) dynamically imported module|Importing a module script failed|Importing binding name '[^']*' is not found|The requested module '[^']*' does(?: not|n't) provide an export named/i;
 /**
  * Runaway recursion, in every browser phrasing (Chrome/Safari "Maximum call
  * stack size exceeded", Firefox "too much recursion"). Deliberately NOT in
@@ -445,6 +481,13 @@ const MASKED_URL_FRAME = /^webkit-masked-url:/;
  */
 const CSP_EVAL_BLOCK = /unsafe-eval.*Content Security Policy|Content Security Policy.*unsafe-eval/;
 /**
+ * Chrome's wording for a `<script>` whose inline source failed to parse when it
+ * was inserted: the DOM call is prefixed onto the parse error. Deliberately NOT
+ * in `MARKETING_IGNORE_ERRORS`: this bundle appends scripts too (turnstile.ts,
+ * debugbear-rum.ts), so only a frame gate can tell an injected script from ours.
+ */
+const APPEND_CHILD_PARSE_FAILURE = /^Failed to execute 'appendChild' on 'Node': /;
+/**
  * A script the browser fetched but could not PARSE. Deliberately NOT in
  * `MARKETING_IGNORE_ERRORS`: a `SyntaxError` message is generic enough that our
  * own bundle could in principle produce one (a `JSON.parse` on a malformed API
@@ -482,6 +525,12 @@ const PLAIN_OBJECT_REJECTION = /^Object captured as promise rejection with keys:
  */
 const JSON_RPC_RESERVED_MIN = -32768;
 const JSON_RPC_RESERVED_MAX = -32000;
+/**
+ * EIP-1193 provider error codes: 4001 user rejected, 4100 unauthorized, 4200
+ * unsupported method, 4900 disconnected, 4901 chain disconnected. Exact values,
+ * not a range — the protocol defines these five and nothing between them.
+ */
+const EIP1193_PROVIDER_CODES: ReadonlySet<number> = new Set([4001, 4100, 4200, 4900, 4901]);
 
 /**
  * Stack-gated suppressors for messages that our own minified bundle COULD
@@ -601,8 +650,9 @@ export function marketingBeforeSend<T extends PolicyEvent>(event: T): T | null {
   // is still not a precedent to copy, though the old reason given here — that
   // the dashboard bundle mints its own DOMException carrying caller frames —
   // was wrong, and cost WORLDMONITOR-Q4. `createTimeoutSignal` only mints one
-  // on the pre-Baseline-2024 fallback path; every current engine takes the
-  // native `AbortSignal.timeout` branch and produces the same frameless
+  // on the pre-Baseline-2024 fallback path, and stamps it with the native
+  // header-only stack; every current engine takes the native
+  // `AbortSignal.timeout` branch instead. Both produce the same frameless
   // rejection seen here (Chromium 141: `stack` is the header line alone).
   // What separates the two surfaces is that the dashboard gate exempts any
   // event carrying a first-party `kind` tag, which its checkout and panel
@@ -643,6 +693,28 @@ export function marketingBeforeSend<T extends PolicyEvent>(event: T): T | null {
   // injection.
   if (nonInfraFrames.length === 0
       && CSP_EVAL_BLOCK.test(msg)
+      && frames.some((f) => f.filename === '<anonymous>')) return null;
+
+  // An injected script inserting a `<script>` whose inline source fails to
+  // parse. WORLDMONITOR-12D is the shape: `SyntaxError: Failed to execute
+  // 'appendChild' on 'Node': Invalid regular expression: missing /` on Chrome
+  // 152 / Windows at `/`, an `onerror` capture whose eight frames are all
+  // `<anonymous>`, beside breadcrumbs from a third-party RUM beacon this surface
+  // never loads. The dashboard drops the same class through its
+  // `/Invalid regular expression: missing/` entry and `appendChild.*Unexpected`
+  // gate; the two surfaces run separate Sentry clients.
+  //
+  // Gated like the eval rule above, on the WHOLE stack being `<anonymous>` or
+  // infra: a parse failure attributable to this bundle's own script loaders
+  // would ride a `/pro/assets/*.js` frame, and one from an inline first-party
+  // script would put the document URL on the stack. A frame with no filename
+  // is dropped from `nonInfraFrames` yet could be that attributing frame, so
+  // it keeps the event reporting (PR #8174 review). The `SyntaxError` type
+  // keeps a script that parsed and then threw reporting.
+  if (nonInfraFrames.length === 0
+      && frames.every((f) => Boolean(f.filename?.trim()))
+      && exceptionType === 'SyntaxError'
+      && APPEND_CHILD_PARSE_FAILURE.test(msg)
       && frames.some((f) => f.filename === '<anonymous>')) return null;
 
   // A module the browser fetched but could not parse. WORLDMONITOR-TS is the
@@ -693,9 +765,22 @@ export function marketingBeforeSend<T extends PolicyEvent>(event: T): T | null {
   // `tests/pro-sentry-filter-policy.test.mts` fails if a JSON-RPC client is
   // ever added to this surface, rather than letting the rule silently widen.
   //
-  // Deliberately narrow on the CODE: EIP-1193's own `4001` (user rejected the
-  // request) is outside the reserved range and keeps reporting, as does any
-  // non-integer, string, or absent code.
+  // EIP-1193's own provider codes (4001, 4100, 4200, 4900, 4901) are dropped
+  // on the same argument. They were first left reporting in case our bundle
+  // ever minted one, but no first-party code here talks to a wallet provider,
+  // and 8 of the issue's 9 events were a wallet extension's `{code: 4001,
+  // message}` — the rule had matched only the minority -32603 event.
+  // `tests/pro-sentry-filter-policy.test.mts` pins the bundle as wallet-free so
+  // the codes stay proof of origin. Any other number, a non-integer, a string,
+  // or an absent code keeps reporting.
+  //
+  // One dependency no test can pin: `@clerk/clerk-js` bundles wallet SDKs, and
+  // its Web3 sign-in helpers rethrow provider errors. They are unreachable
+  // while this bundle never calls them (scanned) and Web3 sign-in stays
+  // disabled on the Clerk instance (disabled as of 2026-09-14). Enabling it
+  // there makes a wallet code possible from our own sign-in path, so BOTH
+  // halves of this rule — the reserved range and these codes — must be
+  // re-derived first.
   //
   // The payload's own `message` is deliberately NOT consulted, so
   // `{code: -32603, message: 'checkout failed'}` is dropped too (raised in
@@ -712,8 +797,8 @@ export function marketingBeforeSend<T extends PolicyEvent>(event: T): T | null {
   if (PLAIN_OBJECT_REJECTION.test(msg)
       && typeof rejectedCode === 'number'
       && Number.isInteger(rejectedCode)
-      && rejectedCode >= JSON_RPC_RESERVED_MIN
-      && rejectedCode <= JSON_RPC_RESERVED_MAX) return null;
+      && ((rejectedCode >= JSON_RPC_RESERVED_MIN && rejectedCode <= JSON_RPC_RESERVED_MAX)
+        || EIP1193_PROVIDER_CODES.has(rejectedCode))) return null;
 
   // An injected script attributed to the document URL, dereferencing an iframe
   // this bundle does not have. Instagram's in-app browser was the observed case

@@ -20,6 +20,12 @@ function quotedList(values) {
 
 export const OPENAPI_FILTER_PARAM_SCHEMA_OVERRIDES = [
   {
+    path: '/api/news/v1/list-country-headlines',
+    method: 'get',
+    name: 'country_codes',
+    schema: { type: 'array', minItems: 1, maxItems: 250, items: { type: 'string' } },
+  },
+  {
     path: '/api/infrastructure/v1/get-bootstrap-data',
     method: 'get',
     name: 'keys',
@@ -221,6 +227,7 @@ function schemaLines(schema, indent = 18, name = 'schema') {
   }
   if (schema.pattern) lines.push(`${pad}pattern: ${quoteYaml(schema.pattern)}`);
   if (Number.isInteger(schema.maxItems)) lines.push(`${pad}maxItems: ${schema.maxItems}`);
+  if (Number.isInteger(schema.minItems)) lines.push(`${pad}minItems: ${schema.minItems}`);
   if (Number.isInteger(schema.minLength)) lines.push(`${pad}minLength: ${schema.minLength}`);
   if (schema.items) lines.push(...schemaLines(schema.items, indent + 2, 'items'));
   return lines;
