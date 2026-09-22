@@ -5,7 +5,7 @@ import type {
 
 import { getCachedJson } from '../../../_shared/redis';
 
-import { normalizeMarketCode } from './_market-code';
+import { resolveConsumerPriceSelection } from './_selection';
 
 const DEFAULT_RANGE = '30d';
 const VALID_RANGES = new Set(['7d', '30d', '90d']);
@@ -14,13 +14,7 @@ export async function listConsumerPriceMovers(
   _ctx: unknown,
   req: ListConsumerPriceMoversRequest,
 ): Promise<ListConsumerPriceMoversResponse> {
-  // Seed keys are lowercase (`consumer-prices:movers:ae:30d`); the OpenAPI
-  // contract documents ISO 3166-1 alpha-2, which callers send as "US"/"AE".
-  // The shared helper normalizes case AND validates the shape, the same way
-  // `range` is guarded by VALID_RANGES one line below — see _market-code.ts for
-  // the two defects that motivated it (uppercase miss, whitespace-only code
-  // producing an empty key segment).
-  const market = normalizeMarketCode(req.marketCode);
+  const { market } = resolveConsumerPriceSelection(req.marketCode);
   const range = VALID_RANGES.has(req.range ?? '') ? req.range! : DEFAULT_RANGE;
   const key = `consumer-prices:movers:${market}:${range}`;
 

@@ -5,7 +5,9 @@ import type {
 
 import { getCachedJson } from '../../../_shared/redis';
 
-import { DEFAULT_MARKET, normalizeMarketCode } from './_market-code';
+import { resolveConsumerPriceSelection } from './_selection';
+
+const DEFAULT_MARKET = 'ae';
 
 const EMPTY: GetConsumerPriceOverviewResponse = {
   marketCode: DEFAULT_MARKET,
@@ -26,7 +28,7 @@ export async function getConsumerPriceOverview(
   _ctx: unknown,
   req: GetConsumerPriceOverviewRequest,
 ): Promise<GetConsumerPriceOverviewResponse> {
-  const market = normalizeMarketCode(req.marketCode);
+  const { market } = resolveConsumerPriceSelection(req.marketCode);
   const key = `consumer-prices:overview:${market}`;
 
   try {

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { afterEach, beforeEach, test } from 'node:test';
 import { listConsumerPriceMovers } from '../server/worldmonitor/consumer-prices/v1/list-consumer-price-movers';
-import { createConsumerPricesServiceRoutes, type ConsumerPricesServiceHandler } from '../src/generated/server/worldmonitor/consumer_prices/v1/service_server';
+import { createConsumerPricesServiceRoutes, ValidationError, type ConsumerPricesServiceHandler } from '../src/generated/server/worldmonitor/consumer_prices/v1/service_server';
 
 const originalFetch = globalThis.fetch;
 const originalEnv = { ...process.env };
@@ -51,54 +51,49 @@ test('uppercase ISO-2 market codes hit the lowercase seed key', async () => {
   assert.equal(body.marketCode, 'ae');
 });
 
-test('a whitespace-only market code falls back to the default, not an empty key segment', async () => {
-  // `'  '` is truthy, so `(req.marketCode || DEFAULT_MARKET).trim()` skipped the
-  // default and built `consumer-prices:movers::30d` — a key nothing ever seeds.
+test('malformed or unsupported market codes are rejected before any cache read', async () => {
+  // #8359 made the market an explicit selection (resolveConsumerPriceSelection):
+  // an unusable code is a 400, not a silent fallback to another market's data.
   const routes = createConsumerPricesServiceRoutes({ listConsumerPriceMovers } as ConsumerPricesServiceHandler);
   const route = routes.find((entry) => entry.path.endsWith('/list-consumer-price-movers'))!;
-  const response = await route.handler(new Request(`https://worldmonitor.app${route.path}?market_code=%20%20&range=30d`));
-  assert.equal(response.status, 200);
-  await response.json();
-  assert.deepEqual(keys, ['consumer-prices:movers:ae:30d']);
-});
-
-test('a non-ISO market code falls back to the default instead of reaching the cache key', async () => {
-  const routes = createConsumerPricesServiceRoutes({ listConsumerPriceMovers } as ConsumerPricesServiceHandler);
-  const route = routes.find((entry) => entry.path.endsWith('/list-consumer-price-movers'))!;
-  const response = await route.handler(new Request(`https://worldmonitor.app${route.path}?market_code=not-a-country&range=30d`));
-  assert.equal(response.status, 200);
-  await response.json();
-  assert.deepEqual(keys, ['consumer-prices:movers:ae:30d']);
-});
-
-test('every consumer-prices handler normalizes the market code the same way', () => {
-  // #8385 review: the uppercase fix originally landed in list-consumer-price-movers
-  // alone, so a caller sending the OpenAPI contract's own "US" example got real
-  // movers data beside five empty stubs. All six must route through the shared
-  // normalizer; a new sibling that hand-rolls `req.marketCode || DEFAULT_MARKET`
-  // fails here rather than silently reintroducing the split.
-  const dir = new URL('../server/worldmonitor/consumer-prices/v1/', import.meta.url);
-  const handlers = [
-    'get-consumer-price-basket-series.ts',
-    'get-consumer-price-freshness.ts',
-    'get-consumer-price-overview.ts',
-    'list-consumer-price-categories.ts',
-    'list-consumer-price-movers.ts',
-    'list-retailer-price-spreads.ts',
-  ];
-  for (const name of handlers) {
-    const src = readFileSync(new URL(name, dir), 'utf8');
-    assert.match(
-      src,
-      /normalizeMarketCode\(req\.marketCode\)/,
-      `${name} must derive its market code via the shared normalizeMarketCode helper`,
-    );
-    assert.doesNotMatch(
-      src,
-      /req\.marketCode\s*\|\|\s*DEFAULT_MARKET/,
-      `${name} must not hand-roll the market-code default (case and shape bugs live there)`,
-    );
+  for (const code of ['%20%20', 'not-a-country', 'zz']) {
+    const response = await route.handler(new Request(`https://worldmonitor.app${route.path}?market_code=${code}&range=30d`));
+    assert.equal(response.status, 400, code);
   }
+  assert.deepEqual(keys, []);
+});
+
+const SELECTION_HANDLERS = [
+  ['get-consumer-price-overview', 'getConsumerPriceOverview', 'consumer-prices:overview:us'],
+  ['list-consumer-price-categories', 'listConsumerPriceCategories', 'consumer-prices:categories:us:30d'],
+  ['list-consumer-price-movers', 'listConsumerPriceMovers', 'consumer-prices:movers:us:30d'],
+  ['list-retailer-price-spreads', 'listRetailerPriceSpreads', 'consumer-prices:retailer-spread:us:essentials-us'],
+] as const;
+
+for (const [file, exportName, expectedKey] of SELECTION_HANDLERS) {
+  test(`${file} resolves the market like basket-series and freshness`, async () => {
+    const mod = await import(`../server/worldmonitor/consumer-prices/v1/${file}.ts`);
+    const handler = mod[exportName] as (ctx: unknown, req: Record<string, unknown>) => Promise<unknown>;
+    // The OpenAPI contract documents ISO 3166-1 alpha-2 ("US"); the seeder
+    // writes lowercase keys, so the lookup must be normalized.
+    await handler({}, { marketCode: 'US', basketSlug: '', range: '30d', limit: 0, categorySlug: '' });
+    assert.deepEqual(keys, [expectedKey]);
+    keys.length = 0;
+    await assert.rejects(
+      handler({}, { marketCode: '  ', basketSlug: '', range: '30d', limit: 0, categorySlug: '' }),
+      (error: unknown) => error instanceof ValidationError,
+    );
+    assert.deepEqual(keys, []);
+  });
+}
+
+test('retailer spreads rejects a basket that is not the market essentials basket', async () => {
+  const { listRetailerPriceSpreads } = await import('../server/worldmonitor/consumer-prices/v1/list-retailer-price-spreads.ts');
+  await assert.rejects(
+    listRetailerPriceSpreads({}, { marketCode: 'ae', basketSlug: 'essentials-us' }),
+    (error: unknown) => error instanceof ValidationError,
+  );
+  assert.deepEqual(keys, []);
 });
 
 test('both movers producers include the public 90d range and seed metadata', () => {

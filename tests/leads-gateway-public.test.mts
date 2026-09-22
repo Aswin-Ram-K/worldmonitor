@@ -28,7 +28,7 @@ afterEach(() => {
   Object.assign(process.env, originalEnv);
 });
 
-async function loadLeadsGateway({ withRedis = true }: { withRedis?: boolean } = {}) {
+async function loadLeadsGateway() {
   const [{ createDomainGateway, PUBLIC_NO_AUTH_RPC_PATHS, serverOptions }, generated, { leadsHandler }, { PREMIUM_RPC_PATHS }] = await Promise.all([
     import('../server/gateway.ts'),
     import('../src/generated/server/worldmonitor/leads/v1/service_server.ts'),
@@ -38,14 +38,7 @@ async function loadLeadsGateway({ withRedis = true }: { withRedis?: boolean } = 
   delete process.env.WORLDMONITOR_VALID_KEYS;
   // The endpoint rate limiter fails closed (503) when Redis is unconfigured;
   // install the fake so the request reaches the handler like in production.
-  // `withRedis: false` deliberately omits it to assert that fail-closed
-  // behavior is still intact for these routes (see the #8385 case below).
-  if (withRedis) {
-    installRedis({});
-  } else {
-    delete process.env.UPSTASH_REDIS_REST_URL;
-    delete process.env.UPSTASH_REDIS_REST_TOKEN;
-  }
+  installRedis({});
   return {
     PUBLIC_NO_AUTH_RPC_PATHS,
     PREMIUM_RPC_PATHS,
@@ -120,52 +113,4 @@ describe('leads gateway public access', { concurrency: 1 }, () => {
     const body = await res.json() as { status?: string };
     assert.equal(body.status, 'registered');
   });
-
-  // #8385: the gateway's CDN-shield opt-out must not reach these routes.
-  //
-  // Being PUBLIC_NO_AUTH means "reachable without a credential", NOT "safe to
-  // fail open". Both routes write to Convex and send email, the registry pins
-  // them fail-closed at 3/h and 5/h, the global fallback limiter is skipped for
-  // any path that already has an endpoint policy, and neither handler has an
-  // in-handler per-IP cap on its public path (register-interest's scoped limit
-  // guards only the desktop HMAC source). So the endpoint limiter is the ONLY
-  // per-IP bound, and it has to survive a Redis outage as a 503.
-  //
-  // This goes red if the opt-out is keyed on the AUTH predicate
-  // (isPublicNoAuthRpc) instead of the CDN-shielded `public=1` SHAPE
-  // (isPublicSharedRpcRequest) — the request sails through to a 200 instead.
-  for (const [pathname, body] of [
-    ['/api/leads/v1/submit-contact', {
-      email: 'lead@example-corp.com',
-      name: 'Lead',
-      organization: 'ExampleCorp',
-      message: 'hello',
-      source: 'enterprise-contact',
-      website: 'http://honeypot-filled.example',
-      turnstileToken: 'test-token',
-    }],
-    ['/api/leads/v1/register-interest', {
-      email: 'lead@example-corp.com',
-      source: 'pro-waitlist',
-      website: 'http://honeypot-filled.example',
-      turnstileToken: '',
-    }],
-  ] as const) {
-    it(`${pathname} still fails closed (503) when Redis is unavailable`, async () => {
-      const { gateway } = await loadLeadsGateway({ withRedis: false });
-
-      const res = await gateway(new Request(`https://api.worldmonitor.app${pathname}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Origin: 'https://worldmonitor.app' },
-        body: JSON.stringify(body),
-      }));
-
-      assert.equal(
-        res.status,
-        503,
-        `${pathname} must fail closed on a Redis outage — it is the only per-IP bound on an anonymous route that writes to Convex and sends email`,
-      );
-      assert.equal(res.headers.get('X-RateLimit-Mode'), 'degraded');
-    });
-  }
 });

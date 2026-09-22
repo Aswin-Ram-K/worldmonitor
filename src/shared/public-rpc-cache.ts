@@ -16,11 +16,9 @@ const PUBLIC_SHARED_RPC_PATHS = new Set([
 ]);
 
 const NEWS_VARIANTS = new Set(['full', 'tech', 'finance', 'happy', 'commodity', 'energy']);
-// Exported as the ONE list of digest languages (#8385 review). The digest
-// handler needs the same set to decide which langs get their own shard, and a
-// hand-copied second list would let the two drift: a lang in only this set
-// would be CDN-cached under its own public key while the handler served the
-// `en` body under it.
+// The ONE list of digest languages. list-feed-digest.ts rejects any other lang
+// with a 400 (#8360); a hand-copied second list would let the handler and this
+// public-shape classifier drift apart.
 export const NEWS_LANGUAGES = new Set([
   'en', 'bg', 'cs', 'fr', 'de', 'el', 'es', 'hr', 'hu', 'it', 'pl', 'pt', 'nl',
   'sv', 'sw', 'ru', 'uk', 'ar', 'fa', 'zh', 'ja', 'ko', 'ro', 'tr', 'th', 'vi', 'hi',
