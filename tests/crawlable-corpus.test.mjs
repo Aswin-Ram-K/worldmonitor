@@ -5260,9 +5260,10 @@ describe('crawlable corpus generator', () => {
         livePulseMovementClaimLastmod(data.livePulse.capturedAt, now),
         gitFileLastmod(repoRoot, data.sources.countryRegions),
         gitFileLastmod(repoRoot, data.sources.microstateTerritories),
+        gitFileLastmod(repoRoot, RELATED_READING_PATH),
         COUNTRY_PAGE_CONTENT_VERSION,
       ),
-      'countries lastmod must fold snapshot, pulse, movement-claim expiry, geographic inputs and the page content version',
+      'countries lastmod must fold snapshot, pulse, movement-claim expiry, geographic inputs, related reading and the page content version',
     );
     // #7518 set COUNTRY_PAGE_CONTENT_VERSION and CII_COUNTRY_PAGE_CONTENT_VERSION
     // to the same date, so the two clocks coincide by value. Pin the DERIVATION
@@ -5595,6 +5596,7 @@ describe('live-pulse snapshot injection (#7533)', () => {
         gitFileLastmod(repoRoot, data.sources.microstateTerritories),
         ...CHOKEPOINT_PAGE_LASTMOD_PATHS.map((path) => gitFileLastmod(repoRoot, path)),
         gitFileLastmod(repoRoot, data.sources.crisisRegistry),
+        gitFileLastmod(repoRoot, RELATED_READING_PATH),
         COUNTRY_PAGE_CONTENT_VERSION,
         CII_COUNTRY_PAGE_CONTENT_VERSION,
         COUNTRIES_INDEX_CONTENT_VERSION,
@@ -5670,6 +5672,7 @@ describe('live-pulse snapshot injection (#7533)', () => {
           ['crises', [
             laterDate(
               gitFileLastmod(repoRoot, data.sources.crisisRegistry),
+              gitFileLastmod(repoRoot, RELATED_READING_PATH),
               pulseDate,
               CRISIS_PAGE_CONTENT_VERSION,
             ),
