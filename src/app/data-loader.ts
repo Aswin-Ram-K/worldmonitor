@@ -4328,14 +4328,15 @@ export class DataLoaderManager implements AppModule {
    * The procurement panel was reset for a principal change (sign-out,
    * downgrade, or a switch to another Pro account). Drop the previous
    * account's filters and cached results, then reload for the current account
-   * when it still has access. App fires its account-transition loaders before
-   * panel gating runs, so the load already in flight carries the old filters;
-   * clearGlobalTenders() supersedes it and the reload replaces it.
+   * (loadGlobalTenders applies the access gate itself). App fires its
+   * account-transition loaders before panel gating runs, so the load already
+   * in flight carries the old filters; clearGlobalTenders() supersedes it and
+   * the reload replaces it.
    */
   private resetGlobalTendersForPrincipal(): void {
     void this.clearGlobalTenders();
     void Promise.resolve().then(() => {
-      if (this.ctx.isDestroyed || !hasPremiumAccess()) return;
+      if (this.ctx.isDestroyed) return;
       void this.loadGlobalTenders();
     });
   }
