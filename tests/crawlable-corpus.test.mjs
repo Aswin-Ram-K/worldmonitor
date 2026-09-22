@@ -99,6 +99,7 @@ import { buildMicrostateCoverageStoryContent } from '../scripts/microstate-cover
 import { buildSourceCatalog, sourceProviderDisplayName } from '../scripts/crawlable-sources-page.mjs';
 import { resolveSourceOrigin, sourceOriginLabel } from '../scripts/source-origin.mjs';
 import { USE_CASES_CONTENT_VERSION } from '../scripts/build-use-cases.mjs';
+import { RELATED_READING_PATH } from '../scripts/related-reading.mjs';
 import { ACCURACY_CONTENT_VERSION } from '../scripts/build-accuracy-page.mjs';
 import { COMPARISONS_CONTENT_VERSION } from '../scripts/build-comparison-pages.mjs';
 import { shiftLivePulseDates } from './helpers/shift-live-pulse-dates.mjs';
@@ -1660,6 +1661,7 @@ describe('crawlable corpus generator', () => {
       'scripts/comparison-page-narratives.mjs',
       'shared/source-attribution-manifest.json',
       'src/config/chokepoint-registry.ts',
+      'shared/related-reading.json',
     ]);
   });
 
@@ -5637,6 +5639,7 @@ describe('live-pulse snapshot injection (#7533)', () => {
           pulseDate,
           gitFileLastmod(repoRoot, data.sources.countryRegions),
           gitFileLastmod(repoRoot, data.sources.microstateTerritories),
+          gitFileLastmod(repoRoot, RELATED_READING_PATH),
           COUNTRY_PAGE_CONTENT_VERSION,
         );
         // Self-check the premise: with the escalated date the fold must land
