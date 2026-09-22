@@ -84,7 +84,9 @@ unentitled account.
 
 A `pending` row whose continuation was lost is re-armed by the
 `account-deletion-stalled-reaper` cron every 5 minutes once it is older than
-`PENDING_STALE_AFTER_MS` (10 minutes), so recovery takes at most ~15 minutes.
+`PENDING_STALE_AFTER_MS` (10 minutes), so a stalled deletion recovers within
+~15 minutes. Each tick re-arms at most 20 rows (`REAP_STALLED_LIMIT`); a larger
+backlog drains over later ticks, 20 rows per 5 minutes.
 Look for `account_deletion_stalled_rearmed` in the logs.
 
 Do **not** pass an email argument. Extra fields are rejected.
