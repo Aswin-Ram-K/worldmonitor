@@ -6292,7 +6292,7 @@ describe('country recent developments', () => {
       const html = renderCountryDevelopments({
         countryName: 'Sudan', developments: { ...DEVELOPMENTS, brief: null, briefSkipped },
       });
-      assert.doesNotMatch(html, /data-brief-unavailable|No country brief|publishers|grounding|withheld|request failed|<script>/);
+      assert.doesNotMatch(html, /data-brief-unavailable|No country brief|publishers|grounding|withheld|request failed|<script>/i);
       assert.ok(!html.includes('data-intel-brief'));
       assert.ok(html.includes(HEADLINE.url), 'keep the lighter sourced developments');
     }

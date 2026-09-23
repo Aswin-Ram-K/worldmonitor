@@ -3577,12 +3577,12 @@ export function assertCountryDevelopmentsRendered({
     }
   }
   if (rows.brief && Array.isArray(rows.brief.evidence)) {
-    // Structured briefs render their non-Situation claims; every one must
-    // reach the page, and a brief with none renders no block to check.
-    const pageText = html.replace(/<[^>]+>/g, '');
+    // Structured briefs render their non-Situation claims, each as escaped
+    // text in its own paragraph; every one must reach the page, and a brief
+    // with none renders no block to check.
     for (const section of publishedBriefSections(rows.brief, { countryCode, countryName })) {
       for (const claim of section.claims) {
-        if (!pageText.includes(escapeHtml(claim.text))) {
+        if (!html.includes(escapeHtml(claim.text))) {
           throw new Error(`${pagePath} dropped its frozen intel brief`);
         }
       }
