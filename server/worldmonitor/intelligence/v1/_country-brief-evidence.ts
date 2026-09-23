@@ -13,9 +13,6 @@ import { CII_RISK_SCORE_CACHE_KEYS } from '../../../_shared/cache-keys';
 import { displayNameForIso2 } from '../../../_shared/country-normalize';
 import { CHOKEPOINT_REGISTRY } from '../../../_shared/chokepoint-registry';
 import { sanitizeForPromptLine } from '../../../_shared/llm-sanitize.js';
-// Imported, never restated: the prefix has been bumped 20+ times, and a copied
-// literal would silently read a dead generation.
-import { RESILIENCE_SCORE_CACHE_PREFIX } from '../../resilience/v1/_shared';
 import { instabilityBand } from '../../../../shared/cii-band.js';
 import { CHOKEPOINT_COUNTRY_CODES } from '../../../../shared/chokepoint-countries.js';
 import { countryMentionTerms, mentionsCountry } from '../../../../shared/country-mention.js';
@@ -49,6 +46,11 @@ export interface CountryBriefEvidenceOptions {
 }
 
 const ADVISORIES_KEY = 'intelligence:advisories:v1';
+// Mirrors RESILIENCE_SCORE_CACHE_PREFIX in resilience/v1/_shared.ts. Importing
+// it would pull the resilience scoring engine into the intelligence edge
+// bundle; tests/resilience-cache-keys-health-sync.test.mts fails this file on
+// the next prefix bump instead.
+const RESILIENCE_SCORE_CACHE_PREFIX = 'resilience:score:v28:';
 const SANCTIONS_COUNTS_KEY = 'sanctions:country-counts:v1';
 // The counts map carries no timestamp of its own; the seeder writes this meta
 // record beside it in the same publish.

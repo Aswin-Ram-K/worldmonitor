@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import { parseCountryBriefSources, renderEvidenceGroundedCountryBrief } from '../server/worldmonitor/intelligence/v1/get-country-intel-brief.ts';
+import { parseBriefSections } from '../scripts/crawlable-developments.mjs';
 
 describe('evidence-grounded country brief rendering', () => {
   const sources = [
@@ -36,6 +37,18 @@ describe('evidence-grounded country brief rendering', () => {
     assert.deepEqual(result.evidence.map((item) => item.id), ['E2']);
   });
 
+  it('renders text the corpus parses back into the same sections and claims', () => {
+    const result = render(payload({
+      implications: [claim('Finland completes a border fence while its fiscal space scores 28 of 100 in the Country Resilience Index.', [1], ['E2'])],
+      risks: [claim("Finland's Country Instability Index is 31 of 100 (Low) as of Sep 21, 2026.", [], ['E1'])],
+      outlook: [claim("Polymarket prices 'Will Finland close its eastern border by December 31?' at 62% (closes Dec 31, 2026).", [], ['E3'])],
+      watch: [claim('Fitburg defendants deny sabotage', [2])],
+    }));
+    const parsed = parseBriefSections(result.text, { countryCode: 'FI', countryName: 'Finland' });
+    assert.deepEqual(parsed.map((section) => section.key), ['situation', 'implications', 'risks', 'outlook', 'watch']);
+    assert.deepEqual(parsed.map(({ key, claims }) => ({ key, claims })), result.sections.map(({ key, claims }) => ({ key, claims })));
+  });
+
   it('never emits evidence-limit or withheld notices', () => {
     const result = render(payload({ risks: [claim('Tamar output increases 30%', [], ['E2'])] }));
     assert.ok(result);
@@ -54,6 +67,22 @@ describe('evidence-grounded country brief rendering', () => {
   it('takes numbers only from cited evidence when a claim cites both kinds', () => {
     const laundered = render(payload({ risks: [claim("Finland's Country Instability Index is 85 of 100.", [3], ['E1'])] }));
     assert.deepEqual(laundered.sections.map((section) => section.key), ['situation']);
+  });
+
+  it('binds numbers to the cited value, not to its as-of date, its scale or a second metric', () => {
+    for (const bad of [
+      claim("Finland's Country Instability Index is 21 of 100 (Low).", [], ['E1']),
+      claim("Finland's Country Instability Index is 100.", [], ['E1']),
+      claim("Finland's fiscal space scores 31 of 100 in the Country Resilience Index and its Country Instability Index is 28 of 100.", [], ['E1', 'E2']),
+    ]) {
+      assert.deepEqual(render(payload({ risks: [bad] })).sections.map((section) => section.key), ['situation'], bad.text);
+    }
+  });
+
+  it('drops sentences about the evidence instead of about the country', () => {
+    const result = render(payload({ watch: [claim('The supplied headlines do not establish this.', [1])] }));
+    assert.deepEqual(result.sections.map((section) => section.key), ['situation']);
+    assert.equal(result.withheld, 1);
   });
 
   it('enforces the citation kinds each section accepts (AE3)', () => {

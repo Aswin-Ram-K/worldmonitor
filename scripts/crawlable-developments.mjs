@@ -9,9 +9,11 @@
 import { publisherFamilyFor, publisherFamilyForDomain } from '../shared/publisher-families.js';
 import { AGGREGATOR_LINK_HOSTS, isVerifiableArticleUrl } from '../shared/article-url.js';
 export { AGGREGATOR_LINK_HOSTS, isVerifiableArticleUrl };
-import { validateNoHallucinatedFacts, validateNoHallucinatedProperNouns } from '../shared/brief-llm-core.js';
+import { validateNoHallucinatedFacts, validateNoHallucinatedProperNouns, validateNoHallucinatedStatusQualifiers } from '../shared/brief-llm-core.js';
+import { evidenceNumbersGrounded, isEvidenceLimitClaim } from '../shared/brief-claim-rules.js';
 import { resolveIso2 } from './_country-resolver.mjs';
-const BRIEF_SECTION_HEADERS = ['SITUATION NOW', 'KEY RISKS', 'OUTLOOK', 'WATCH ITEMS'];
+import { BRIEF_FIXED_SECTION_HEADINGS, briefSectionKey } from '../shared/brief-sections.js';
+const BRIEF_SECTION_HEADERS = BRIEF_FIXED_SECTION_HEADINGS;
 
 // Provenance stamp on a headline row the freeze took from the per-country
 // GDELT article index (#7748) rather than the curated digest feeds. Carried
@@ -29,9 +31,14 @@ function hostnameOf(url) {
 }
 
 export function isBriefSectionHeader(line, { countryCode = '', countryName = '' } = {}) {
-  const upper = String(line || '').trim().toUpperCase().replace(/:\s*$/, '');
+  const raw = String(line || '').trim().replace(/:\s*$/, '');
+  const upper = raw.toUpperCase();
   if (BRIEF_SECTION_HEADERS.includes(upper)) return true;
   const country = upper.match(/^WHAT THIS MEANS FOR (.+)$/)?.[1];
+  // The server writes this heading in capitals with its own display name,
+  // which the resolver cannot always map back ("CÔTE D’IVOIRE"). A line wholly
+  // in capitals is a heading; mixed-case prose that opens with the phrase is not.
+  if (country && raw === upper && /\p{L}/u.test(country)) return true;
   return Boolean(country && (/^[A-Z]{2}$/.test(country)
     || country === String(countryCode).trim().toUpperCase()
     || country === String(countryName).trim().toUpperCase()
@@ -206,9 +213,13 @@ export function briefCitationGroundingGap(brief, country = {}, { requireHeadline
   }
   const comparable = (text) => text.normalize('NFKD').replace(/\p{M}/gu, '');
   const titles = brief.sources.map((source) => comparable(stripMarkdownMarkers(source.title)));
-  const factTexts = new Map((Array.isArray(brief.evidence) ? brief.evidence : [])
+  // An evidence array marks the evidence-grounded format, whose claims follow
+  // the server's rules (shared/brief-claim-rules.js); pre-migration briefs keep
+  // the per-title rule they were published under.
+  const evidenceFormat = Array.isArray(brief.evidence);
+  const evidenceById = new Map((evidenceFormat ? brief.evidence : [])
     .filter((item) => typeof item?.id === 'string' && typeof item?.factText === 'string')
-    .map((item) => [item.id, comparable(item.factText)]));
+    .map((item) => [item.id, { value: String(item.value ?? ''), factText: comparable(item.factText) }]));
   let citationCount = 0;
   for (const rawLine of normalizeBriefText(brief.text, country).split('\n')) {
     const line = rawLine.trim();
@@ -217,19 +228,26 @@ export function briefCitationGroundingGap(brief, country = {}, { requireHeadline
     citationCount += indexes.length;
     if (indexes.some((index) => index < 1 || index > titles.length)) return 'out-of-range citation';
     const evidenceIds = [...line.matchAll(/\[(E\d{1,2})\]/g)].map((match) => match[1]);
-    if (evidenceIds.some((id) => !factTexts.has(id))) return 'unknown evidence citation';
+    if (evidenceIds.some((id) => !evidenceById.has(id))) return 'unknown evidence citation';
     if (!requireHeadlineCitation) citationCount += evidenceIds.length;
     const claim = comparable(line.replace(/\[\d+\]/g, '').replace(/\[E\d{1,2}\]/g, '')
       .replace(/^(?:[•-]\s*|\*\s+)/, '')
       .replace(/^NEXT \d+H:\s*/i, '')
       .replace(/^WHAT THIS MEANS FOR\s+/i, '').trim());
     if (!claim) return 'empty cited claim';
-    if (evidenceIds.length > 0) {
-      const cited = evidenceIds.map((id) => factTexts.get(id));
-      const names = validateNoHallucinatedProperNouns(claim, [...indexes.map((index) => titles[index - 1]), ...cited].join(' . '), { failClosed: true });
-      if (!names.ok) return `evidence does not ground ${JSON.stringify(names.hallucinated || [])}`;
-      const numbers = validateNoHallucinatedFacts(claim, cited.join(' . '));
-      if (!numbers.ok) return `evidence does not ground ${JSON.stringify(numbers.hallucinated || [])}`;
+    if (evidenceFormat && indexes.length + evidenceIds.length > 0) {
+      // One claim over everything it cites, exactly as the server validated it.
+      if (isEvidenceLimitClaim(claim)) return 'evidence-limit claim';
+      const cited = evidenceIds.map((id) => evidenceById.get(id));
+      const citedTitles = indexes.map((index) => titles[index - 1]);
+      const grounds = [...citedTitles, ...cited.map((item) => item.factText)];
+      const names = validateNoHallucinatedProperNouns(claim, grounds.join(' . '), { failClosed: true });
+      if (!names.ok) return `citations do not ground ${JSON.stringify(names.hallucinated || [])}`;
+      const numbersGrounded = cited.length > 0
+        ? evidenceNumbersGrounded(claim, cited)
+        : validateNoHallucinatedFacts(claim, citedTitles.join(' . ')).ok;
+      if (!numbersGrounded) return 'citations do not ground its numbers';
+      if (!validateNoHallucinatedStatusQualifiers(claim, grounds).ok) return 'citations do not ground its status qualifier';
       continue;
     }
     const evidence = indexes.length ? indexes.map((index) => titles[index - 1]) : [titles.join('\n')];
@@ -244,12 +262,6 @@ export function briefCitationGroundingGap(brief, country = {}, { requireHeadline
   return citationCount > 0 ? null : 'missing citations';
 }
 
-const SECTION_KEYS = new Map([
-  ['SITUATION NOW', 'situation'],
-  ['KEY RISKS', 'risks'],
-  ['OUTLOOK', 'outlook'],
-  ['WATCH ITEMS', 'watch'],
-]);
 const CLAIM_LINE_RE = /^(.*\S)\s+((?:\[(?:\d{1,2}|E\d{1,2})\])+)$/;
 
 /**
@@ -267,8 +279,7 @@ export function parseBriefSections(text, country = {}) {
     if (!line) continue;
     if (isBriefSectionHeader(line, country)) {
       const heading = line.replace(/:\s*$/, '');
-      const upper = heading.toUpperCase();
-      sections.push({ key: SECTION_KEYS.get(upper) ?? (upper.startsWith('WHAT THIS MEANS FOR') ? 'implications' : 'other'), heading, claims: [] });
+      sections.push({ key: briefSectionKey(heading) ?? 'other', heading, claims: [] });
       continue;
     }
     if (sections.length === 0) sections.push({ key: 'other', heading: '', claims: [] });

@@ -2264,6 +2264,56 @@ describe('country intel brief caching behavior', { concurrency: 1 }, () => {
     }
   });
 
+  it('grounds a premium English request without Source lines on the server digest', async () => {
+    // The dashboard sends signal context without Source lines when it has no
+    // headlines of its own; that must not cost a premium caller the brief.
+    const { module, cleanup } = await importCountryIntelBrief({ premium: true });
+    const restoreEnv = withEnv(INTEL_TEST_ENV);
+    const originalFetch = globalThis.fetch;
+    const store = new Map();
+    store.set('news:digest:v1:full:en', JSON.stringify({ categories: { conflict: { items: [
+      { title: 'Israel announces new security framework', source: 'Reuters', link: 'https://example.com/il-1', pubDate: '2026-07-05T06:00:00.000Z' },
+    ] } } }));
+    const counters = { groqCalls: 0 };
+    const userPrompts = [];
+    installIntelFetchMock({ store, setKeys: [], userPrompts, counters });
+    try {
+      const out = await module.getCountryIntelBrief(
+        makeCtx('https://example.com/api/intelligence/v1/get-country-intel-brief?country_code=IL&context=CII%3A%2045%2F100'),
+        { countryCode: 'IL' },
+      );
+      assert.equal(counters.groqCalls, 1);
+      assert.match(userPrompts[0], /\[1\] Israel announces new security framework/);
+      assert.equal(out.brief, 'SITUATION NOW\nIsrael announces new security framework [1]');
+      assert.equal(out.sources[0]?.url, 'https://example.com/il-1');
+    } finally {
+      globalThis.fetch = originalFetch;
+      restoreEnv();
+      await cleanup?.();
+    }
+  });
+
+  it('makes no LLM call for an ungrounded shared request in any language', async () => {
+    const { module, cleanup } = await importCountryIntelBrief();
+    const restoreEnv = withEnv(INTEL_TEST_ENV);
+    const originalFetch = globalThis.fetch;
+    const counters = { groqCalls: 0 };
+    installIntelFetchMock({ store: new Map(), setKeys: [], userPrompts: [], counters });
+    try {
+      const out = await module.getCountryIntelBrief(
+        makeCtx('https://example.com/api/intelligence/v1/get-country-intel-brief?country_code=FR&lang=fr'),
+        { countryCode: 'FR' },
+      );
+      assert.equal(counters.groqCalls, 0);
+      assert.equal(out.brief, '');
+      assert.equal(out.countryName, 'France', 'an empty brief still names the country, unlike an invalid code');
+    } finally {
+      globalThis.fetch = originalFetch;
+      restoreEnv();
+      await cleanup?.();
+    }
+  });
+
   it('writes no English brief from sports-only caller context', async () => {
     const { module, cleanup } = await importCountryIntelBrief({ premium: true });
     const restoreEnv = withEnv(INTEL_TEST_ENV);
@@ -2571,6 +2621,7 @@ describe('country intel brief caching behavior', { concurrency: 1 }, () => {
       assert.equal(first.brief, '');
       assert.equal(second.brief, '');
       assert.deepEqual(first.evidence, []);
+      assert.equal(setKeys.length, 1, 'one shared negative-cache write; the second call is served from it');
       assert.ok(setKeys.every((key) => key.startsWith('ci-sebuf:v9:US:en:shared')), `anon callers land on the shared key, got ${setKeys}`);
     } finally {
       cleanup();

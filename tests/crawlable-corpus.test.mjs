@@ -5947,6 +5947,21 @@ describe('country recent developments', () => {
       assertCountryBriefPresentation({ pagePath: '/countries/sudan/', html, sources: developments.brief.sources, evidence: EVIDENCE });
     });
 
+    it('titles every published section and rejects malformed evidence', () => {
+      const outlook = { key: 'outlook', heading: 'OUTLOOK', claims: [{ text: "A Polymarket market related to Sudan, 'Sudan ceasefire by December 31?', priced Yes at 40% on Sep 2, 2026.", sourceIndexes: [], evidenceIds: ['E3'] }] };
+      const html = renderCountryDevelopments({ countryCode: 'SD', countryName: 'Sudan', developments: structured([MEANS, RISKS, outlook]) });
+      for (const heading of ['What this means for Sudan', 'Key risks', 'Outlook']) {
+        assert.ok(html.includes(`<h3>${heading}</h3>`), heading);
+      }
+      const developments = structured([RISKS]);
+      assert.throws(() => renderCountryDevelopments({ countryCode: 'SD', countryName: 'Sudan', developments: {
+        ...developments, brief: { ...developments.brief, evidence: 'E1' },
+      } }), /malformed evidence/);
+      assert.throws(() => renderCountryDevelopments({ countryCode: 'SD', countryName: 'Sudan', developments: {
+        ...developments, brief: { ...developments.brief, evidence: [{ ...EVIDENCE[0], url: 'http://insecure.test/cii' }, ...EVIDENCE.slice(1)] },
+      } }), /https URL/);
+    });
+
     it('marks an external data-point link nofollow', () => {
       const outlook = { key: 'outlook', heading: 'OUTLOOK', claims: [{ text: "A Polymarket market related to Sudan, 'Sudan ceasefire by December 31?', priced Yes at 40% on Sep 2, 2026.", sourceIndexes: [], evidenceIds: ['E3'] }] };
       const html = renderCountryDevelopments({ countryCode: 'SD', countryName: 'Sudan', developments: structured([outlook]) });

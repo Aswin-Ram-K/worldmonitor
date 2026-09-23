@@ -41,6 +41,7 @@ import {
   isVerifiableArticleUrl,
   MIN_BRIEF_GROUNDING_PUBLISHERS,
   normalizeFrozenDevelopments,
+  parseBriefSections,
 } from './crawlable-developments.mjs';
 import { countryIndexPath, topUpCountryIndex } from './crawlable-country-index.mjs';
 import { selectDeclaredScorecardFields } from './build-accuracy-page.mjs';
@@ -683,6 +684,17 @@ function selectCountryHeadlines(digestItems, code, limit = COUNTRY_HEADLINE_LIMI
 // Rows a brief may cite: the same title predicate the server grounding and
 // the MCP tool apply. Order is preserved, so citation indexes built over the
 // result stay aligned with the frozen sources.
+// Two captured evidence-grounded briefs with no citation between them is not
+// chance: every English brief is offered the country's CII, advisory and
+// resilience data points.
+const MIN_EVIDENCE_GATE_BRIEFS = 2;
+
+function evidenceFormatBriefs(countries) {
+  return Object.entries(countries)
+    .map(([code, row]) => ({ code, brief: row.developments?.brief }))
+    .filter(({ brief }) => brief && Array.isArray(brief.evidence) && typeof brief.text === 'string');
+}
+
 function briefGroundingRows(rows) {
   return rows.filter((row) => isBriefRelevantTitle(row?.title));
 }
@@ -1302,6 +1314,15 @@ export async function freezeCrawlableLivePulse({
         .filter((row) => (row.developments?.headlines?.length || 0) > 0).length,
       briefCountryCount: Object.values(countries)
         .filter((row) => row.developments?.brief != null).length,
+      // Evidence-grounded briefs (the server returned an evidence array), the
+      // ones among them citing at least one World Monitor data point, and the
+      // ones a page shows beyond Situation (which "Recent developments" covers).
+      briefEvidenceFormatCount: evidenceFormatBriefs(countries).length,
+      briefEvidenceCitedCount: evidenceFormatBriefs(countries)
+        .filter(({ brief }) => /\[E\d{1,2}\]/.test(brief.text)).length,
+      briefAnalysisCount: evidenceFormatBriefs(countries)
+        .filter(({ code, brief }) => parseBriefSections(brief.text, { countryCode: code })
+          .some((section) => section.key !== 'situation')).length,
       // Grounding eligibility is independent of credentials or request outcome,
       // and measured on the rows a brief may cite.
       briefEligibleCount: [...headlinesByCode.values()]
@@ -1416,6 +1437,17 @@ export async function freezeCrawlableLivePulse({
         + firstCaptureCause(developmentsErrors),
       );
     }
+    // An evidence-pack outage fails soft on the server (every source drops
+    // out), so the briefs still arrive, Situation-only, and every page renders
+    // no brief block. Legacy-format responses (a server that predates the
+    // evidence pack) do not engage this gate.
+    if (snapshot.coverage.briefEvidenceFormatCount >= MIN_EVIDENCE_GATE_BRIEFS
+      && snapshot.coverage.briefEvidenceCitedCount === 0) {
+      throw new Error(
+        `Pulse freeze: ${snapshot.coverage.briefEvidenceFormatCount} evidence-grounded briefs cited no World Monitor data point; `
+        + 'the evidence pack is unavailable',
+      );
+    }
     const minBriefs = minimumBriefCaptures(snapshot.coverage.briefMatchedCount);
     if (checkedBriefs < minBriefs) {
       throw new Error(
@@ -1459,6 +1491,8 @@ if (isMain) {
         + `quotes=${snapshot.coverage.quoteCount} `
         + `headlineCountries=${snapshot.coverage.headlineCountryCount} `
         + `briefCountries=${snapshot.coverage.briefCountryCount} `
+        + `briefEvidenceCited=${snapshot.coverage.briefEvidenceCitedCount}/${snapshot.coverage.briefEvidenceFormatCount} `
+        + `briefAnalysis=${snapshot.coverage.briefAnalysisCount} `
         + `briefEligible=${snapshot.coverage.briefEligibleCount} `
         + `briefUnsupportedCitations=${snapshot.coverage.briefUnsupportedCitationCount} `
         + `briefThinGrounding=${snapshot.coverage.briefThinGroundingCount} `

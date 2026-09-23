@@ -17,6 +17,8 @@ import { ENERGY_SPINE_KEY_PREFIX } from '../../../_shared/cache-keys';
 import { deriveCountryIntelCacheKey, fetchSharedCountryContext } from './_country-brief-context';
 import { buildCountryBriefEvidence } from './_country-brief-evidence';
 import { isBriefRelevantTitle } from '../../../../shared/brief-relevance.js';
+import { evidenceNumbersGrounded, isEvidenceLimitClaim } from '../../../../shared/brief-claim-rules.js';
+import { briefSectionHeading, type BriefSectionKey } from '../../../../shared/brief-sections.js';
 import {
   resolveEnergyImportDependency,
   UNAVAILABLE_ENERGY_IMPORT_DEPENDENCY,
@@ -30,7 +32,6 @@ const INTEL_CACHE_TTL = 21600;
 const COUNTRY_CODE_RE = /^[A-Za-z]{2}$/;
 const LANG_RE = /^[a-z]{2}(-[a-z]{2})?$/;
 
-type BriefSectionKey = 'situation' | 'implications' | 'risks' | 'outlook' | 'watch';
 
 // A World Monitor data point a claim may cite. `url` is optional here; the
 // response normalizes it to the generated contract.
@@ -87,16 +88,6 @@ const SECTION_RULES: ReadonlyArray<{
   { key: 'watch', maxClaims: 2, accepts: ({ sources, evidence }) => sources > 0 || evidence.some((item) => FORWARD_EVIDENCE_KINDS.has(item.kind)) },
 ];
 
-function sectionHeading(key: BriefSectionKey, countryName: string): string {
-  switch (key) {
-    case 'situation': return 'SITUATION NOW';
-    case 'implications': return `WHAT THIS MEANS FOR ${countryName.toUpperCase()}`;
-    case 'risks': return 'KEY RISKS';
-    case 'outlook': return 'OUTLOOK';
-    case 'watch': return 'WATCH ITEMS';
-  }
-}
-
 const SOURCE_CITATION_RE = /^(?:([1-6])|\[([1-6])\])$/;
 const EVIDENCE_ID_RE = /^E\d{1,2}$/;
 
@@ -135,17 +126,22 @@ function parseEvidenceCitations(value: unknown, byId: Map<string, CountryBriefEv
 
 const comparable = (value: string) => value.normalize('NFKD').replace(/\p{M}/gu, '');
 
-// Each claim is checked only against what it cites. Numbers bind to cited
-// evidence whenever evidence is cited: a headline's "85 killed" must never
-// license "the Country Instability Index is 85". Headline titles still supply
-// names, and status qualifiers ("former", "acting") are checked per cited
-// text because data points never name people.
+// Each claim is checked only against what it cites. Numbers bind to the cited
+// data point whenever evidence is cited (shared/brief-claim-rules.js): a
+// headline's "85 killed" or an as-of day must never license "the Country
+// Instability Index is 85". Headline titles still supply names, and status
+// qualifiers ("former", "acting") are checked per cited text because data
+// points never name people. A sentence about the material ("the headlines do
+// not establish this") is not a claim about the country.
 function claimIsGrounded(text: string, titles: string[], evidence: CountryBriefEvidenceInput[]): boolean {
+  if (isEvidenceLimitClaim(text)) return false;
   const factTexts = evidence.map((item) => item.factText);
   const grounds = [...titles, ...factTexts];
   if (!validateNoHallucinatedProperNouns(comparable(text), comparable(grounds.join(' . ')), { failClosed: true }).ok) return false;
-  const numericGround = factTexts.length > 0 ? factTexts.join(' . ') : titles.join(' . ');
-  if (!validateNoHallucinatedFacts(text, numericGround).ok) return false;
+  const numbersGrounded = evidence.length > 0
+    ? evidenceNumbersGrounded(text, evidence)
+    : validateNoHallucinatedFacts(text, titles.join(' . ')).ok;
+  if (!numbersGrounded) return false;
   return validateNoHallucinatedStatusQualifiers(text, grounds).ok;
 }
 
@@ -199,7 +195,7 @@ export function renderEvidenceGroundedCountryBrief(
     }
     if (rule.key === 'situation' && accepted.length === 0) return null;
     if (accepted.length === 0) continue;
-    const heading = sectionHeading(rule.key, countryName);
+    const heading = briefSectionHeading(rule.key, countryName);
     sections.push({ key: rule.key, heading, claims: accepted });
     blocks.push(`${heading}\n${lines.join('\n')}`);
   }
@@ -415,6 +411,9 @@ Rules:
         const shared = await fetchSharedCountryContext(req.countryCode.toUpperCase());
         promptContext = shared.contextSnapshot;
         entrySources = shared.sources;
+        // Nothing grounds a shared brief in any language: the analyst prompt
+        // would write one from the model's own knowledge.
+        if (entrySources.length === 0) return null;
       }
 
       // The name/fact validators use English rules, not translated entity
@@ -427,6 +426,13 @@ Rules:
         // saying anything about it. Filtering here also covers caller-supplied
         // context, which arrives without a news classification.
         entrySources = entrySources.filter((source) => isBriefRelevantTitle(source.title));
+        // A premium caller whose context carries no usable Source lines (the
+        // dashboard sends signal context alone when it has no headlines) is
+        // grounded on the same server digest a shared caller gets.
+        if (entrySources.length === 0 && isPremium) {
+          const shared = await fetchSharedCountryContext(countryCode);
+          entrySources = shared.sources.filter((source) => isBriefRelevantTitle(source.title));
+        }
         // No relevant headline, no brief: the analyst prompt below would
         // otherwise write an ungrounded one with 24/48/72-hour predictions.
         if (entrySources.length === 0) return null;
@@ -451,6 +457,7 @@ Sections:
 
 Rules:
 - In a sentence that cites a data point, copy every number, percentage and date exactly from the cited data points; never use a number from a headline in that sentence.
+- A sentence that states a number may cite only one data point that has a value. Put each data point's number in its own sentence.
 - In a sentence that cites only headlines, copy numbers exactly from the cited headlines.
 - Copy names and labels exactly as written, e.g. "Country Instability Index". Do not expand acronyms, and do not add titles or roles such as former or acting that the cited text does not state.
 - Do not invent causes, impacts, quantities or forecasts, and do not use background knowledge.
@@ -548,7 +555,9 @@ Rules:
     return empty;
   }
 
-  if (!result) return empty;
+  // A known country with nothing to ground a brief still carries its name,
+  // unlike an invalid country code.
+  if (!result) return { ...empty, countryName };
   if (!isPremium) {
     // Shared entries carry server-derived sources; never backfill them with
     // this caller's parsed context (the brief text didn't see it).

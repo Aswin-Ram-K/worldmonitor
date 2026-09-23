@@ -442,6 +442,39 @@ describe('evidence-grounded briefs', () => {
     ]);
   });
 
+  it('applies the server claim rules: joined multi-headline grounding, bound numbers, qualifiers, no evidence-limit sentences', () => {
+    const withTitles = (text) => ({
+      text,
+      sources: [...sources, { title: 'President Sisi meets CIA chief', source: 'Ahram', url: 'https://ahram.org.eg/sisi' }],
+      evidence,
+    });
+    const gap = (line) => briefCitationGroundingGap(withTitles(`SITUATION NOW\nEgypt stands firm on Gaza ceasefire [1]\nWATCH ITEMS\n${line}`));
+    assert.equal(gap('Egypt stands firm on Gaza ceasefire as Egypt agrees to South Sudan dam [1][2]'), null, 'the server accepts this two-headline claim');
+    assert.equal(gap('President Sisi meets CIA chief [3]'), null);
+    assert.ok(gap('Former President Sisi meets CIA chief [3]'), 'a status qualifier the title never made');
+    assert.ok(gap("Egypt's fiscal space scores 29 of 100 in the Country Resilience Index. [E1]"), 'a number taken from the as-of date');
+    assert.ok(gap('The supplied headlines do not establish this. [1]'), 'a sentence about the evidence');
+  });
+
+  it('recognizes the server heading for a country name the resolver cannot map (Côte d’Ivoire)', () => {
+    const ciSources = [
+      { title: 'Côte d’Ivoire signs LNG import deal', source: 'Reuters', url: 'https://reuters.com/ci' },
+      { title: 'Côte d’Ivoire court reduces charges', source: 'BBC', url: 'https://bbc.com/ci' },
+    ];
+    const ciEvidence = [{ id: 'E1', kind: 'advisory', label: 'Travel advisory', value: 'Exercise Increased Caution', asOf: '2026-09-21T00:00:00.000Z',
+      factText: 'The most severe government travel advisory World Monitor tracks for Côte d’Ivoire is Exercise Increased Caution.' }];
+    const text = 'SITUATION NOW\nCôte d’Ivoire signs LNG import deal [1]\n\nWHAT THIS MEANS FOR CÔTE D’IVOIRE\nCôte d’Ivoire signs LNG import deal while its travel advisory is Exercise Increased Caution. [1][E1]';
+    assert.equal(briefCitationGroundingGap({ text, sources: ciSources, evidence: ciEvidence }, { countryCode: 'CI' }), null);
+    assert.deepEqual(parseBriefSections(text, { countryCode: 'CI' }).map((section) => section.key), ['situation', 'implications']);
+    // Prose that merely starts with the phrase is still a claim, not a heading.
+    assert.deepEqual(parseBriefSections('SITUATION NOW\nWhat this means for Côte d’Ivoire is unclear [1]', { countryCode: 'CI' }).map((section) => section.key), ['situation']);
+  });
+
+  it('keeps the per-title rule for pre-migration briefs', () => {
+    const legacy = { text: 'SITUATION NOW\nEgypt stands firm on Gaza ceasefire as Egypt agrees to South Sudan dam [1][2]', sources };
+    assert.ok(briefCitationGroundingGap(legacy));
+  });
+
   it('still requires at least one headline citation', () => {
     assert.equal(briefCitationGroundingGap(brief("KEY RISKS\nEgypt's fiscal space scores 28 of 100 in the Country Resilience Index. [E1]")), 'missing citations');
   });

@@ -1784,6 +1784,34 @@ describe('freeze per-country developments capture', () => {
       )), JSON.stringify(snapshot.errors.developments));
     });
 
+    it('counts cited data points and fails the run when evidence-grounded briefs cite none', async () => {
+      stubFetch({ digestItems: countryDigestItems(), briefOverrides: { SD: { brief: brief(), evidence: evidence() } } });
+      const { snapshot } = await runFreeze({ serviceKey: 'test-key' });
+      assert.equal(snapshot.coverage.briefEvidenceCitedCount, 1);
+      assert.equal(snapshot.coverage.briefAnalysisCount, 1, 'Key risks is published beyond the Situation');
+
+      // Every evidence-grounded response came back with an empty pack: the
+      // pages would publish Situation-only briefs, which render no brief block.
+      stubFetch({
+        digestItems: countryDigestItems(),
+        briefOverrides: {
+          SD: { brief: `SITUATION NOW\n${SITUATION} [1]`, evidence: [] },
+          NO: { brief: 'SITUATION NOW\nNorway opens new arctic port [1]', evidence: [] },
+        },
+      });
+      await assert.rejects(runFreeze({ serviceKey: 'test-key' }), /cited no World Monitor data point/);
+    });
+
+    it('rejects a brief carrying a malformed evidence item', async () => {
+      const [item] = evidence();
+      stubFetch({ digestItems: countryDigestItems(), briefOverrides: { SD: { brief: brief(), evidence: [{ ...item, factText: '' }] } } });
+      const { snapshot } = await runFreeze({ serviceKey: 'test-key' });
+      assert.equal(snapshot.countries.SD.developments.brief, null);
+      assert.ok(snapshot.errors.developments.some((entry) => (
+        entry.code === 'SD' && entry.stage === 'brief' && entry.message.includes('invalid evidence item')
+      )), JSON.stringify(snapshot.errors.developments));
+    });
+
     it('keeps pre-migration responses in the legacy shape', async () => {
       stubFetch({ digestItems: countryDigestItems(), briefOverrides: { SD: { brief: `SITUATION NOW\n${SITUATION} [1]` } } });
       const { snapshot } = await runFreeze({ serviceKey: 'test-key' });

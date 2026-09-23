@@ -55,6 +55,12 @@ const RESULT_VERB_RE = /\b(?:thrash(?:es|ed)?|beat|beats|defeat(?:s|ed)?|edge(?:
 // "army chief retires amid international pressure" stays eligible.
 const FAREWELL_RE = /\bfarewell (?:match|game)\b|\binternational retirement\b|\bretire[sd]? from (?:international (?:football|cricket|rugby)|the national team)\b|\boffered farewell\b/i;
 
+// Security, rights, legal and casualty news stays eligible even when it names
+// a sport, a star or an award: "North Korea executes man for sharing K-pop
+// videos", "Crowd crush at football stadium kills 125", "Hunger striker dies",
+// "Nigeria wins appeal to overturn arbitration award".
+const KEEP_RE = /\b(?:kill(?:s|ed|ing)?|dead|dies|died|deaths?|execut(?:es?|ed|ion)|arrest(?:s|ed)?|jail(?:s|ed)?|sentenced|detain(?:s|ed)?|protest(?:s|ers?)?|tear gas|crush|stampede|attack(?:s|ed)?|bomb(?:s|ing|ed)?|shooting|court|appeal|arbitration|sanction(?:s|ed)?|coup|riots?|clash(?:es)?|police|(?:anti-)?government|minister|ban(?:s|ned)?|hunger strik(?:e|er)|match-fixing|corruption|fraud)\b/i;
+
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -77,7 +83,7 @@ const TERM_RULES = [
 export function briefIrrelevanceReason(title) {
   if (typeof title !== 'string') return null;
   const text = title.replace(/\s+/g, ' ').trim();
-  if (!text) return null;
+  if (!text || KEEP_RE.test(text)) return null;
   for (const [reason, re] of TERM_RULES) {
     if (re.test(text)) return reason;
   }

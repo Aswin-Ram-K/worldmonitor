@@ -43,6 +43,20 @@ describe('briefIrrelevanceReason', () => {
     }
   });
 
+  it('keeps security, rights and legal news that happens to name a sport, a star or an award', () => {
+    for (const title of [
+      'North Korea executes man for sharing K-pop videos',
+      'Hunger striker dies in Bahrain prison',
+      'Crowd crush at Indonesia football stadium kills 125',
+      'Nigeria wins appeal to overturn $11bn P&ID arbitration award',
+      'Police fire tear gas at protesters outside World Cup stadium',
+      'Actress arrested over anti-government posts',
+      'Court jails footballer for match-fixing',
+    ]) {
+      assert.equal(briefIrrelevanceReason(title), null, title);
+    }
+  });
+
   it('keeps honours given to office-holders and peace prizes', () => {
     assert.equal(briefIrrelevanceReason('Tuvalu PM Teo to receive Rising Nations Leaders award'), null);
     assert.equal(briefIrrelevanceReason('Jailed dissident wins Nobel Peace Prize'), null);
