@@ -1359,7 +1359,13 @@ export class DataLoaderManager implements AppModule {
   async loadSatellites(): Promise<void> {
     this.stopSatellitePropagation();
     const data = await fetchSatelliteTLEs();
-    if (!data || data.length === 0) return;
+    if (!data || data.length === 0) {
+      // Confirmed empty, expired, or unavailable without last-good data:
+      // clear the layer instead of leaving the previous orbits on the map.
+      this.cachedSatRecs = [];
+      this.ctx.map?.setSatellites([]);
+      return;
+    }
     try {
       this.cachedSatRecs = await initSatRecs(data);
     } catch (err) {
@@ -4281,6 +4287,7 @@ export class DataLoaderManager implements AppModule {
       procurementPanel.setRequestHandler((nextFilters, shouldAppend, requestSignal) => {
         return this.loadGlobalTenders(nextFilters, shouldAppend, requestSignal);
       });
+      procurementPanel.setPrincipalResetHandler(() => this.resetGlobalTendersForPrincipal());
       if (!hasPremiumAccess()) {
         if (isCanceledOrStale()) return;
         procurementPanel.clear();
@@ -4315,6 +4322,23 @@ export class DataLoaderManager implements AppModule {
     } finally {
       releaseScopedRequest();
     }
+  }
+
+  /**
+   * The procurement panel was reset for a principal change (sign-out,
+   * downgrade, or a switch to another Pro account). Drop the previous
+   * account's filters and cached results, then reload for the current account
+   * (loadGlobalTenders applies the access gate itself). App fires its
+   * account-transition loaders before panel gating runs, so the load already
+   * in flight carries the old filters; clearGlobalTenders() supersedes it and
+   * the reload replaces it.
+   */
+  private resetGlobalTendersForPrincipal(): void {
+    void this.clearGlobalTenders();
+    void Promise.resolve().then(() => {
+      if (this.ctx.isDestroyed) return;
+      void this.loadGlobalTenders();
+    });
   }
 
   async clearGlobalTenders(): Promise<void> {
@@ -4941,9 +4965,13 @@ export class DataLoaderManager implements AppModule {
   async loadSecurityAdvisories(): Promise<void> {
     try {
       const result = await fetchSecurityAdvisories();
-      if (result.ok) {
-        this.callPanel('security-advisories', 'setData', result.advisories);
-        this.ctx.intelligenceCache.advisories = result.advisories;
+      // A failed read carries last-good advisories for at most an hour (or
+      // none): show them under an error header, or the full error view.
+      this.callPanel('security-advisories', 'setData', result.advisories);
+      this.ctx.intelligenceCache.advisories = result.advisories;
+      if (!result.ok) {
+        if (result.advisories.length > 0) this.callPanel('security-advisories', 'setErrorState', true);
+        else this.callPanel('security-advisories', 'showError');
       }
     } catch (error) {
       console.error('[App] Security advisories fetch failed:', error);
