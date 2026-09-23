@@ -1150,6 +1150,89 @@ describe('freeze per-country developments capture', () => {
     ];
   }
 
+  it('keeps sports rows in Recent developments but grounds the brief only on relevant rows', async () => {
+    // A football score grounded Burkina Faso's "What this means" in the
+    // 2026-09-21 snapshot. Every origin is filtered: the digest row and the
+    // index row below both name Sudan and both are sport.
+    const requested = [];
+    stubFetch({
+      digestItems: [
+        ...countryDigestItems(),
+        {
+          title: 'Sudan stun Ghana in World Cup qualifier',
+          source: 'Sports Desk',
+          link: 'https://sports.test/sudan-ghana',
+          snippet: '',
+          publishedAt: Date.now() - 3800_000,
+          importanceScore: 75,
+        },
+      ],
+      countryArticles: {
+        SD: [indexArticle('Sudan striker signs for Saudi club', 'https://kooora.example/sudan-striker', 'kooora.example')],
+      },
+      onRequest: (href) => requested.push(href),
+    });
+    const { snapshot } = await runFreeze({ serviceKey: 'test-key' });
+    const sudan = snapshot.countries.SD.developments;
+    assert.deepEqual(sudan.headlines.map((row) => row.url), [
+      'https://news.un.org/feed/view/en/story/2026/09/1168270',
+      'https://sports.test/sudan-ghana',
+      'https://example.test/sudan-jeddah',
+      'https://kooora.example/sudan-striker',
+    ], 'Recent developments keeps every row, sport included');
+
+    const briefCall = requested.find((href) => href.includes('get-country-intel-brief?country_code=SD'));
+    const context = new URL(briefCall).searchParams.get('context');
+    assert.doesNotMatch(context, /World Cup|striker/, 'no sports row may reach the brief context');
+    const contextUrls = [...context.matchAll(/^Source \[(\d+)\]: (.+)$/gm)]
+      .map((match) => ({ index: Number(match[1]), url: JSON.parse(match[2]).url }));
+    assert.deepEqual(contextUrls, [
+      { index: 1, url: 'https://news.un.org/feed/view/en/story/2026/09/1168270' },
+      { index: 2, url: 'https://example.test/sudan-jeddah' },
+    ], 'Source indexes are renumbered over the eligible rows, with no gap where the sports row was');
+    assert.deepEqual(
+      sudan.brief.sources.map((source) => source.url),
+      contextUrls.map((entry) => entry.url),
+      'frozen sources are the context rows in context order, so [n] resolves to sources[n-1]',
+    );
+    assert.equal(snapshot.coverage.briefRelevanceFilteredCount, 0, 'Sudan still clears the floor after filtering');
+  });
+
+  it('counts a country the relevance filter drops below the floor apart from one that was thin already', async () => {
+    const requested = [];
+    stubFetch({
+      digestItems: [
+        ...countryDigestItems(),
+        {
+          title: 'Bhutan hydropower export deal signed',
+          source: 'Test Wire',
+          link: 'https://example.test/bhutan-hydro',
+          snippet: '',
+          publishedAt: Date.now() - 3600_000,
+          importanceScore: 60,
+        },
+        {
+          title: 'Bhutan win home football friendly in Thimphu',
+          source: 'Nordic Wire',
+          link: 'https://nordic.test/bhutan-football',
+          snippet: '',
+          publishedAt: Date.now() - 3700_000,
+          importanceScore: 55,
+        },
+      ],
+      onRequest: (href) => requested.push(href),
+    });
+    const { snapshot } = await runFreeze({ serviceKey: 'test-key' });
+    const bhutan = snapshot.countries.BT.developments;
+    assert.equal(bhutan.headlines.length, 2, 'both rows stay in Recent developments');
+    assert.equal(bhutan.brief, null);
+    assert.equal(bhutan.briefSkipped, 'thin-grounding', 'one relevant publisher cannot ground a brief');
+    assert.ok(!requested.some((href) => href.includes('get-country-intel-brief?country_code=BT')));
+    assert.equal(snapshot.coverage.briefRelevanceFilteredCount, 1);
+    assert.equal(snapshot.coverage.briefThinGroundingCount, 0, 'Bhutan cleared the floor before filtering');
+    assert.equal(snapshot.coverage.briefEligibleCount, 2, 'eligibility is measured on the filtered rows');
+  });
+
   it('tops up a country the digest never names from the per-country index: dated headlines, no brief', async () => {
     const requested = [];
     stubFetch({

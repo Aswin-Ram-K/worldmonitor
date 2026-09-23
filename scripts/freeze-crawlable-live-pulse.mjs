@@ -45,6 +45,7 @@ import {
 import { countryIndexPath, topUpCountryIndex } from './crawlable-country-index.mjs';
 import { selectDeclaredScorecardFields } from './build-accuracy-page.mjs';
 import { countryMentionTerms, mentionsCountry } from '../shared/country-mention.js';
+import { isBriefRelevantTitle } from '../shared/brief-relevance.js';
 import { dedupeByArticleUrl, duplicateArticleUrls } from '../shared/article-identity.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -650,6 +651,13 @@ function selectCountryHeadlines(digestItems, code, limit = COUNTRY_HEADLINE_LIMI
     .map((entry) => entry.row);
 }
 
+// Rows a brief may cite: the same title predicate the server grounding and
+// the MCP tool apply. Order is preserved, so citation indexes built over the
+// result stay aligned with the frozen sources.
+function briefGroundingRows(rows) {
+  return rows.filter((row) => isBriefRelevantTitle(row?.title));
+}
+
 // Brief grounding block in the server's `Source [n]` format
 // (_country-brief-context.ts briefSourceContextLines). The brief endpoint
 // verifies citation indexes against entry sources, so the block and the
@@ -1092,13 +1100,24 @@ export async function freezeCrawlableLivePulse({
   // server that starts returning one source per brief would empty the
   // denominator and pass the gate with zero briefs.
   const briefAttemptedCodes = new Set();
+  // Countries whose rows cleared the grounding floor until the relevance
+  // filter removed their sports/entertainment rows. Counted apart from
+  // briefThinGroundingCount so a lexicon change shows up as its own number.
+  const briefRelevanceFilteredCodes = new Set();
   for (const code of Object.keys(countries)) {
     const countryHeadlines = headlinesByCode.get(code) || [];
+    // Recent developments keeps every row; the brief sees only the eligible
+    // subset, in the same order, so buildBriefContext's Source [n] and the
+    // sources the server echoes back describe the same rows.
+    const groundingHeadlines = briefGroundingRows(countryHeadlines);
+    if (hasBriefGrounding(countryHeadlines) && !hasBriefGrounding(groundingHeadlines)) {
+      briefRelevanceFilteredCodes.add(code);
+    }
     const briefSkipped = !keyed
       ? 'no-service-key'
       : countryHeadlines.length === 0
         ? 'no-grounding'
-        : briefGroundingGap(countryHeadlines);
+        : briefGroundingGap(groundingHeadlines);
     const developments = {
       ...emptyDevelopments(freezeStartedAt, briefSkipped),
       headlines: countryHeadlines,
@@ -1106,7 +1125,7 @@ export async function freezeCrawlableLivePulse({
     if (briefSkipped === null) {
       briefAttemptedCodes.add(code);
       try {
-        const context = buildBriefContext(countryHeadlines);
+        const context = buildBriefContext(groundingHeadlines);
         const briefPayload = await authedGet(
           `/api/intelligence/v1/get-country-intel-brief?country_code=${encodeURIComponent(code)}&lang=en&context=${encodeURIComponent(context)}`,
           token,
@@ -1254,8 +1273,14 @@ export async function freezeCrawlableLivePulse({
         .filter((row) => (row.developments?.headlines?.length || 0) > 0).length,
       briefCountryCount: Object.values(countries)
         .filter((row) => row.developments?.brief != null).length,
-      // Grounding eligibility is independent of credentials or request outcome.
-      briefEligibleCount: [...headlinesByCode.values()].filter(hasBriefGrounding).length,
+      // Grounding eligibility is independent of credentials or request outcome,
+      // and measured on the rows a brief may cite.
+      briefEligibleCount: [...headlinesByCode.values()]
+        .filter((rows) => hasBriefGrounding(briefGroundingRows(rows))).length,
+      // Countries the relevance filter (shared/brief-relevance.js) pushed
+      // below the floor. Disjoint from briefThinGroundingCount, which counts
+      // rows that were thin before filtering.
+      briefRelevanceFilteredCount: briefRelevanceFilteredCodes.size,
       briefUnsupportedCitationCount: Object.values(countries)
         .filter((row) => row.developments?.briefSkipped === 'unsupported-citation').length,
       // Countries a brief was requested for: keyed, and grounded on at least
@@ -1269,8 +1294,9 @@ export async function freezeCrawlableLivePulse({
           && !hasBriefGrounding(row.developments?.headlines)).length,
       // Countries the open-web index named but no curated feed did: dated
       // headlines, no brief (#7748 review).
-      briefUncuratedGroundingCount: Object.values(countries)
-        .filter((row) => row.developments?.briefSkipped === 'uncurated-grounding').length,
+      briefUncuratedGroundingCount: Object.entries(countries)
+        .filter(([code, row]) => row.developments?.briefSkipped === 'uncurated-grounding'
+          && !briefRelevanceFilteredCodes.has(code)).length,
       timelineCountryCount: Object.values(countries)
         .filter((row) => (row.developments?.timeline?.length || 0) > 0).length,
       // The enrichment tail (#7748): indexed pages with no dated item at all.
@@ -1407,6 +1433,7 @@ if (isMain) {
         + `briefEligible=${snapshot.coverage.briefEligibleCount} `
         + `briefUnsupportedCitations=${snapshot.coverage.briefUnsupportedCitationCount} `
         + `briefThinGrounding=${snapshot.coverage.briefThinGroundingCount} `
+        + `briefRelevanceFiltered=${snapshot.coverage.briefRelevanceFilteredCount} `
         + `timelineCountries=${snapshot.coverage.timelineCountryCount} `
         + `developmentsCountries=${snapshot.coverage.developmentsCountryCount} `
         + `developmentsMissing=${snapshot.coverage.developmentsMissingCount} `
@@ -1438,6 +1465,14 @@ if (isMain) {
           `[freeze-crawlable-live-pulse] ${snapshot.coverage.developmentsMissingCount} of `
           + `${snapshot.coverage.countryCount} countries have no dated development this run `
           + '(no digest or index mention, brief or timeline event).',
+        );
+      }
+      if (snapshot.coverage.briefRelevanceFilteredCount > 0) {
+        // Separate from the thin-grounding tail: these countries had enough
+        // publishers until their sports/entertainment rows were set aside.
+        console.log(
+          `[freeze-crawlable-live-pulse] ${snapshot.coverage.briefRelevanceFilteredCount} countries skipped a brief `
+          + 'because the relevance filter left them below the grounding floor.',
         );
       }
       if (snapshot.coverage.developmentsCountryIndex.state !== 'available') {
