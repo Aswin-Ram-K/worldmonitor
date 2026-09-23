@@ -282,9 +282,8 @@ export function cpiContentMeta(data) {
       if (newest) tokens.push(newest);
     }
   }
-  tokens.sort();
   if (tokens.length === 0) return null;
-  return tokensToContentMeta([tokens[tokens.length - 1], tokens[0]]);
+  return tokensToContentMeta(tokens);
 }
 
 /**

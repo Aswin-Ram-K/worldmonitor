@@ -149,6 +149,15 @@ describe('getWorldCpiMonthly handler', () => {
     assert.deepEqual(result.countries, []);
   });
 
+  it('does not report a source outage for an unmatched country', async () => {
+    globalThis.fetch = redisPipelineMock({
+      [WORLD_CPI_LATEST_KEYS['imf-cpi']]: { countries: { US: months([['2026-08', 153]]) } },
+    });
+    const result = await getWorldCpiMonthly({} as never, { history: false, country: 'ZZ' });
+    assert.deepEqual(result.countries, []);
+    assert.equal(result.unavailable, false);
+  });
+
   it('filters to one country and omits the rest', async () => {
     globalThis.fetch = redisPipelineMock({
       [WORLD_CPI_LATEST_KEYS['imf-cpi']]: {

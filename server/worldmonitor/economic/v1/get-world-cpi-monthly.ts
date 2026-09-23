@@ -55,7 +55,7 @@ export async function getWorldCpiMonthly(
       history,
       typeof req.country === 'string' ? req.country : undefined,
     );
-    if (countries.length === 0) return { countries: [], unavailable: true };
+    if (Object.keys(selected).length === 0) return { countries: [], unavailable: true };
     return { countries, unavailable: false };
   } catch {
     return { countries: [], unavailable: true };

@@ -27,7 +27,7 @@ import {
 import { parseEurostatHicp, eurostatGeoMap, EUROSTAT_HICP_KEY } from '../scripts/seed-world-cpi-eurostat.mjs';
 import { parseOecdCpiRows, OECD_CPI_KEY } from '../scripts/seed-world-cpi-oecd.mjs';
 import { estatCpiPeriod, parseEstatCpi, ESTAT_CPI_KEY } from '../scripts/seed-world-cpi-estat.mjs';
-import { parseAbsCpiRows, ABS_CPI_KEY } from '../scripts/seed-world-cpi-abs.mjs';
+import { parseAbsCpiRows, ABS_CPI_KEY, ABS_CPI_ACTIVATION_KEY } from '../scripts/seed-world-cpi-abs.mjs';
 import {
   PREFERRED_SOURCE_MAX_LAG_MONTHS,
   WORLD_CPI_CANONICAL_KEYS,
@@ -489,6 +489,32 @@ describe('latest window and content age', () => {
     const meta = cpiContentMeta(payload);
     assert.equal(new Date(meta.newestItemAt).toISOString().slice(0, 7), '2026-08');
     assert.equal(new Date(meta.oldestItemAt).toISOString().slice(0, 7), '2026-06');
+  });
+
+  it('compares mixed monthly and quarterly content clocks chronologically', () => {
+    const payload = buildNational({
+      US: points([['2026-08', 100]]),
+      AU: points([['2026-Q2', 100]]),
+      JP: points([['2020-01', 100]]),
+    });
+    const meta = cpiContentMeta(payload);
+    assert.equal(meta.newestItemAt, Date.UTC(2026, 7, 1));
+    assert.equal(meta.oldestItemAt, Date.UTC(2020, 0, 1));
+  });
+
+  it('declares the Japan source credential before bundle execution', () => {
+    const bundle = readFileSync(new URL('../scripts/seed-bundle-macro.mjs', import.meta.url), 'utf8');
+    const section = bundle.split('\n').find((line) => line.includes("label: 'World-CPI-JP'"));
+    assert.ok(section);
+    assert.match(section, /requiredEnv: \['ESTAT_APPID'\]/);
+  });
+
+  it('writes the ABS activation marker monitored by health', () => {
+    const health = readFileSync(new URL('../api/health.js', import.meta.url), 'utf8');
+    const block = health.match(/worldCpiAbs: \{([\s\S]*?)\n  \},/);
+    assert.ok(block);
+    const activationKey = block[1].match(/activationKey: '([^']+)'/);
+    assert.equal(ABS_CPI_ACTIVATION_KEY, activationKey?.[1]);
   });
 
   it('returns null when there is nothing to clock', () => {

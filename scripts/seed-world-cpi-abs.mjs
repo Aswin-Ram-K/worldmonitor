@@ -32,7 +32,7 @@ loadEnvFile(import.meta.url);
 
 export const ABS_CPI_KEY = 'economic:world-cpi:abs:v1';
 export const ABS_CPI_LATEST_KEY = 'economic:world-cpi:abs:latest:v1';
-export const ABS_CPI_ACTIVATION_KEY = 'seed-activated:economic:world-cpi:abs';
+export const ABS_CPI_ACTIVATION_KEY = 'seed-activated:economic:world-cpi-abs';
 
 const ABS_BASE = 'https://data.api.abs.gov.au/rest/data/CPI';
 // Measure 1 = index, INDEX 10001 = All groups CPI, TSEST 10 = original,
