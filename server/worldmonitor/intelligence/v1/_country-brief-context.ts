@@ -53,17 +53,18 @@ export interface CountryIntelCacheKeyOpts {
 }
 
 export function deriveCountryIntelCacheKey(opts: CountryIntelCacheKeyOpts): string {
-  // v8 retires briefs generated with forced impacts and forecasts beyond their source titles.
+  // v9 retires headline-only briefs: their empty-section disclaimers and
+  // "withheld" notices, and their grounding on sports and global items.
   const energyTag = opts.energyYear ? `:e${opts.energyYear}` : '';
   const energyImportTag = opts.energyImportYear ? `:i${opts.energyImportYear}` : '';
   if (!opts.isPremium) {
     // Anonymous tier: caller inputs must not reach the key, or the shared
     // cache degenerates back into a per-caller one (and one caller's
     // context could mint entries served to everyone).
-    return `ci-sebuf:v8:${opts.countryCode}:${opts.lang}:shared${energyTag}${energyImportTag}`;
+    return `ci-sebuf:v9:${opts.countryCode}:${opts.lang}:shared${energyTag}${energyImportTag}`;
   }
   const fw = opts.frameworkHash ? `:${opts.frameworkHash}` : '';
-  return `ci-sebuf:v8:${opts.countryCode}:${opts.lang}:${opts.contextHash}${fw}${energyTag}${energyImportTag}`;
+  return `ci-sebuf:v9:${opts.countryCode}:${opts.lang}:${opts.contextHash}${fw}${energyTag}${energyImportTag}`;
 }
 
 interface DigestItemForBrief {
