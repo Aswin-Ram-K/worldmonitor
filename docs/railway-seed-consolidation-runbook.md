@@ -1367,10 +1367,12 @@ Recovery is accepted only when:
 | Setting | Value |
 |---|---|
 | **Service name** | `seed-bundle-yield-curves` |
-| **Start command** | `node scripts/seed-bundle-yield-curves.mjs` |
+| **Start command** | `node seed-bundle-yield-curves.mjs` (source root `scripts`) |
 | **Cron schedule** | `0 10 * * *` (daily, 10:00 UTC — offset from the 08:00 macro bundle) |
 | **Watch paths** | See `scripts/railway-services.json` (exact runtime closure; run `node scripts/audit-railway-watch-paths.mjs`) |
-| **Status** | Planned. Provision the service, add its real ID to the active fleet, then apply and verify the registry. |
+| **Status** | Provisioned 2026-09-23. Service `017af607-5a4c-49d7-b8dc-1c28d06d1835` in production. |
+| **Resource limits** | One replica, 1 vCPU, 2 GB RAM; Node heap capped at 1400 MiB. Restart policy `NEVER`. |
+| **Initial source** | Reviewed PR #8543 commit `041f66dd06e00b97506bd8f01272d14f76aa215e` on `feat/government-yield-curves`. After merge, clear the commit pin and switch the source branch to `main`. |
 | **Replaces** | 0 services (new bundle, #8522) |
 | **Net savings** | n/a |
 | **Members** | Yield-Curve-JP (daily), Yield-Curve-CA (daily), Yield-Curve-DE (daily), Yield-Curve-GB (daily), Yield-Curve-AU (daily), Yield-Curve-CH (daily), Yield-Curve-NO (daily), Yield-Curve-SE (daily), OECD-LT-Rates (weekly) |

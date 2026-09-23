@@ -760,7 +760,6 @@
   {
     "entry": "scripts/seed-bundle-yield-curves.mjs",
     "deployMode": "nixpacks-root-scripts",
-    "lifecycle": "planned",
     "service": "seed-bundle-yield-curves",
     "watchPatterns": [
       "scripts/_bundle-runner.mjs",

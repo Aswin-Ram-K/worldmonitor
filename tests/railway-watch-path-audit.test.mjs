@@ -979,8 +979,6 @@ describe('planned Railway service lifecycle', () => {
       // carries Arms-Suppliers, Military-Bases and Mineral-Production, so
       // leaving it planned would exempt three low-cadence members behind a
       // single daily cron from the watch-path and deploy-drift checks.
-      // #8522 still requires provisioning; do not invent a live service ID.
-      'seed-bundle-yield-curves',
       'seed-crypto-sectors',
       'seed-market-quotes',
       'seed-service-statuses',
