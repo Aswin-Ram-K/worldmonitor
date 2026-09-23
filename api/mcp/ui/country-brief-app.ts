@@ -7,8 +7,9 @@
 // Tool result shape (RPC tool — content[0].text JSON). The backing
 // get-country-intel-brief handler emits CAMELCASE identity fields
 // (`countryCode` + a resolved `countryName`), NOT `country_code`:
-//   { countryCode, countryName, brief: string, framework, provider, model,
-//     generatedAt, sources: [{ title, url, source, publishedAt }] }
+//   { countryCode, countryName, brief: string, model, generatedAt,
+//     sources: [{ title, url, source, publishedAt }], sections, evidence }
+// `model` is deliberately never rendered.
 // The title read below prefers `countryName`, then resolves `countryCode`
 // via Intl, and still tolerates a legacy `country_code` for safety.
 //
@@ -93,8 +94,8 @@ const RENDER = `
     }
     q("src-sec").style.display = srcHost.childNodes.length ? "block" : "none";
 
-    // GetCountryIntelBriefResponse carries model but no provider.
-    var prov = [data.model].filter(Boolean).map(collapseWs).filter(Boolean).join(" · ");
+    // The response still carries model for telemetry; no rendered surface
+    // shows it (plan KTD7), so the footer is the generation date alone.
     // generated_at is int64 epoch milliseconds (INT64_ENCODING_NUMBER), so
     // printing it raw read "Generated 1756296000000".
     var genMs = Number(data.generatedAt);
@@ -102,7 +103,7 @@ const RENDER = `
     var gen = genAt && !isNaN(genAt.getTime())
       ? "Generated " + genAt.toISOString()
       : (data.generatedAt != null ? "Generated " + collapseWs(data.generatedAt) : "");
-    q("foot").textContent = [prov, gen].filter(Boolean).join(" · ");
+    q("foot").textContent = gen;
 `;
 
 export const COUNTRY_BRIEF_APP_HTML = buildAppHtml({

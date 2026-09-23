@@ -69,6 +69,7 @@ function stubDownstream({
   digestOk = true,
   digestCoverage,
   briefSources = UPSTREAM_SOURCES,
+  briefExtras = {},
 }) {
   const calls = [];
   globalThis.fetch = async (input, init = {}) => {
@@ -90,6 +91,7 @@ function stubDownstream({
         provider: 'seeded-provider',
         model: 'seeded-model',
         sources: briefSources,
+        ...briefExtras,
       }), { status: 200, headers: { 'Content-Type': 'application/json' } });
     }
     throw new Error(`Unexpected downstream URL: ${String(input)}`);
@@ -148,6 +150,30 @@ describe('get_country_brief grounding corroboration (#4925 item 3)', () => {
     const coverage = tool.outputSchema.properties.digestCoverage.properties;
     for (const field of ['state', 'servedStale', 'staleAgeSeconds', 'staleReason', 'attemptedAt']) {
       assert.ok(coverage[field], `digestCoverage must declare ${field}`);
+    }
+  });
+
+  it('passes structured sections and cited evidence through, and declares them', async () => {
+    const sections = [{
+      key: 'situation',
+      heading: 'SITUATION NOW',
+      claims: [{ text: 'France holds a budget vote.', sourceIndexes: [1], evidenceIds: ['E1'] }],
+    }];
+    const evidence = [{
+      id: 'E1', kind: 'resilience', label: 'Fiscal space', value: '41 of 100',
+      factText: "France's fiscal space scores 41 of 100.", asOf: '2026-09-21T00:00:00.000Z', url: '',
+    }];
+    stubDownstream({ digestItems: [digestItem()], briefExtras: { sections, evidence } });
+
+    const payload = await callCountryBrief();
+
+    assert.deepEqual(payload.sections, sections);
+    assert.deepEqual(payload.evidence, evidence);
+    const tool = __testing__.TOOL_REGISTRY.find(candidate => candidate.name === 'get_country_brief');
+    assert.equal(tool.outputSchema.properties.sections?.type, 'array');
+    assert.equal(tool.outputSchema.properties.evidence?.type, 'array');
+    for (const field of ['id', 'label', 'value', 'asOf', 'url']) {
+      assert.ok(tool.outputSchema.properties.evidence.items.properties[field], `evidence must declare ${field}`);
     }
   });
 

@@ -1491,6 +1491,44 @@ export const RPC_TOOLS: ToolDef[] = [
             },
           },
         },
+        sections: {
+          type: 'array',
+          description: 'The brief as structured claims, one entry per non-empty section. Each claim lists the 1-based sources indexes and evidence ids it cites; the brief text renders these as [n] and [En] markers.',
+          items: {
+            type: 'object',
+            properties: {
+              key: { type: 'string' },
+              heading: { type: 'string' },
+              claims: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    text: { type: 'string' },
+                    sourceIndexes: { type: 'array', items: { type: 'integer' } },
+                    evidenceIds: { type: 'array', items: { type: 'string' } },
+                  },
+                },
+              },
+            },
+          },
+        },
+        evidence: {
+          type: 'array',
+          description: 'World Monitor data points cited by the brief, keyed by the id an [En] marker names.',
+          items: {
+            type: 'object',
+            properties: {
+              id: { type: 'string' },
+              kind: { type: 'string' },
+              label: { type: 'string' },
+              value: { type: 'string' },
+              factText: { type: 'string' },
+              asOf: { type: 'string' },
+              url: { type: 'string', description: 'Empty when the data point has no public page.' },
+            },
+          },
+        },
         groundingStories: {
           type: 'array',
           description: 'Corroboration signals for the digest articles used to ground this brief, so an agent can weigh how well-reported the underlying claims are. Independent of sources, which may instead carry the server-side grounding set, and empty when the digest read failed. Not a citation list — cite from sources.',

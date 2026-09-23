@@ -137,7 +137,10 @@ async function loadCountryBriefPage(options: CountryBriefHarnessOptions = {}) {
       export function escapeHtml(value) { return String(value ?? ''); }
       export function sanitizeUrl(value) { return value ?? ''; }
     `],
-    ['intel-brief-stub', `export function formatIntelBrief(value) { return value; }`],
+    ['intel-brief-stub', `
+      export function formatIntelBrief(value) { return value; }
+      export function renderBriefEvidenceFooter() { return ''; }
+    `],
     ['i18n-stub', `
       export function t(key, params) {
         if (params && typeof params.count === 'number') return key + ':' + params.count;
