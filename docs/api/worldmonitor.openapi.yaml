@@ -14490,8 +14490,13 @@ paths:
                                 "brief": "example"
                                 "countryCode": "US"
                                 "countryName": "US"
+                                "evidence":
+                                    - "asOf": "example"
+                                      "factText": "example"
+                                      "id": "example-id"
+                                      "kind": "example"
+                                      "label": "example"
                                 "generatedAt": 1717200000000
-                                "model": "example"
                             schema:
                                 $ref: '#/components/schemas/worldmonitor_intelligence_v1_GetCountryIntelBriefResponse'
                 "400":
@@ -44901,6 +44906,14 @@ components:
                     type: array
                     items:
                         $ref: '#/components/schemas/worldmonitor_intelligence_v1_BriefSource'
+                sections:
+                    type: array
+                    items:
+                        $ref: '#/components/schemas/worldmonitor_intelligence_v1_BriefSection'
+                evidence:
+                    type: array
+                    items:
+                        $ref: '#/components/schemas/worldmonitor_intelligence_v1_BriefEvidence'
             description: GetCountryIntelBriefResponse contains an AI-generated intelligence brief for a country.
         worldmonitor_intelligence_v1_BriefSource:
             type: object
@@ -44918,6 +44931,65 @@ components:
                     type: string
                     description: Article publication time, when available.
             description: BriefSource describes one article used to ground an AI-generated brief.
+        worldmonitor_intelligence_v1_BriefSection:
+            type: object
+            properties:
+                key:
+                    type: string
+                    description: situation | implications | risks | outlook | watch
+                heading:
+                    type: string
+                    description: Display heading, e.g. KEY RISKS.
+                claims:
+                    type: array
+                    items:
+                        $ref: '#/components/schemas/worldmonitor_intelligence_v1_BriefClaim'
+            description: BriefSection is one brief section with at least one surviving claim.
+        worldmonitor_intelligence_v1_BriefClaim:
+            type: object
+            properties:
+                text:
+                    type: string
+                    description: One factual sentence, without citation markers.
+                sourceIndexes:
+                    type: array
+                    items:
+                        type: integer
+                        format: int32
+                        description: 1-based indexes into sources.
+                evidenceIds:
+                    type: array
+                    items:
+                        type: string
+                        description: Ids of cited evidence items (E1, E2, ...).
+            description: BriefClaim is one validated sentence of a brief and what it cites.
+        worldmonitor_intelligence_v1_BriefEvidence:
+            type: object
+            properties:
+                id:
+                    type: string
+                    description: Stable id within the response, e.g. E1.
+                kind:
+                    type: string
+                    description: |-
+                        cii | advisory | sanctions | resilience | resilience-dimension | energy |
+                         chokepoint | market | forecast
+                label:
+                    type: string
+                    description: Human-readable label, e.g. Country Instability Index.
+                value:
+                    type: string
+                    description: Display value, e.g. 27 of 100 (Low).
+                factText:
+                    type: string
+                    description: The exact sentence claims citing this item are validated against.
+                asOf:
+                    type: string
+                    description: When the value was observed, ISO 8601.
+                url:
+                    type: string
+                    description: Public https link for the value, when one exists.
+            description: BriefEvidence is one World Monitor data point a claim may cite.
         worldmonitor_intelligence_v1_GetCountryCoverageRequest:
             type: object
             properties:

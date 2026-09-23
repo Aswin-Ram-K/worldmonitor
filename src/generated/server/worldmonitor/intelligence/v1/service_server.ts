@@ -135,6 +135,8 @@ export interface GetCountryIntelBriefResponse {
   model: string;
   generatedAt: number;
   sources: BriefSource[];
+  sections: BriefSection[];
+  evidence: BriefEvidence[];
 }
 
 export interface BriefSource {
@@ -142,6 +144,28 @@ export interface BriefSource {
   source: string;
   url: string;
   publishedAt: string;
+}
+
+export interface BriefSection {
+  key: string;
+  heading: string;
+  claims: BriefClaim[];
+}
+
+export interface BriefClaim {
+  text: string;
+  sourceIndexes: number[];
+  evidenceIds: string[];
+}
+
+export interface BriefEvidence {
+  id: string;
+  kind: string;
+  label: string;
+  value: string;
+  factText: string;
+  asOf: string;
+  url: string;
 }
 
 export interface GetCountryCoverageRequest {

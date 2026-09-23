@@ -30,6 +30,45 @@ message BriefSource {
   string published_at = 4;
 }
 
+// BriefClaim is one validated sentence of a brief and what it cites.
+message BriefClaim {
+  // One factual sentence, without citation markers.
+  string text = 1;
+  // 1-based indexes into sources.
+  repeated int32 source_indexes = 2;
+  // Ids of cited evidence items (E1, E2, ...).
+  repeated string evidence_ids = 3;
+}
+
+// BriefSection is one brief section with at least one surviving claim.
+message BriefSection {
+  // situation | implications | risks | outlook | watch
+  string key = 1;
+  // Display heading, e.g. KEY RISKS.
+  string heading = 2;
+  // Claims that passed citation-bound validation.
+  repeated BriefClaim claims = 3;
+}
+
+// BriefEvidence is one World Monitor data point a claim may cite.
+message BriefEvidence {
+  // Stable id within the response, e.g. E1.
+  string id = 1;
+  // cii | advisory | sanctions | resilience | resilience-dimension | energy |
+  // chokepoint | market | forecast
+  string kind = 2;
+  // Human-readable label, e.g. Country Instability Index.
+  string label = 3;
+  // Display value, e.g. 27 of 100 (Low).
+  string value = 4;
+  // The exact sentence claims citing this item are validated against.
+  string fact_text = 5;
+  // When the value was observed, ISO 8601.
+  string as_of = 6;
+  // Public https link for the value, when one exists.
+  string url = 7;
+}
+
 // GetCountryIntelBriefResponse contains an AI-generated intelligence brief for a country.
 message GetCountryIntelBriefResponse {
   // ISO 3166-1 alpha-2 country code.
@@ -44,4 +83,9 @@ message GetCountryIntelBriefResponse {
   int64 generated_at = 5 [(sebuf.http.int64_encoding) = INT64_ENCODING_NUMBER];
   // Source articles used to ground the generated brief.
   repeated BriefSource sources = 6;
+  // Structured sections of an English evidence-grounded brief. Empty for
+  // non-English briefs, which carry text only.
+  repeated BriefSection sections = 7;
+  // World Monitor data points cited by at least one claim.
+  repeated BriefEvidence evidence = 8;
 }

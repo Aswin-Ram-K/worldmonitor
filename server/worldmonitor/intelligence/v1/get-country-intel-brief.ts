@@ -151,6 +151,8 @@ export async function getCountryIntelBrief(
     model: '',
     generatedAt: Date.now(),
     sources,
+    sections: [],
+    evidence: [],
   };
 
   if (!req.countryCode || !COUNTRY_CODE_RE.test(req.countryCode)) return empty;
@@ -373,6 +375,8 @@ Rules:
         model: llmResult.model,
         generatedAt: Date.now(),
         sources: entrySources,
+        sections: [],
+        evidence: [],
       };
     });
   } catch {
