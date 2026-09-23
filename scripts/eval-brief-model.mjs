@@ -52,21 +52,23 @@ if (!live && (capture || arg('model') || arg('digests') || arg('stories'))) thro
 const fixture = JSON.parse(readFileSync(FIXTURE, 'utf8'));
 if (capture && fixture.runs[capture] && !argv.includes('--force')) throw new Error(`runs["${capture}"] exists; pass --force to replace it`);
 
-function printRun(name, run, CHECKS) {
+function printRun(name, run, CHECKS, SIGNALS) {
   console.log(`\n${name}  (${run.model}, prompts ${run.promptSha})${run.note ? `  ${run.note}` : ''}`);
   for (const [surface, s] of Object.entries(run.summary)) {
     const fails = Object.entries(s.fails).filter(([, n]) => n > 0).map(([c, n]) => `${c} ${n}`).join(', ') || 'none';
     const providers = Object.entries(s.providers).map(([p, n]) => `${p} ${n}`).join(', ') || 'n/a';
-    console.log(`  ${surface.padEnd(11)} delivered ${s.delivered}/${s.n} (content rejects ${s.rejectedWithOutput})  fails: ${fails}  p50 ${s.p50Ms}ms p95 ${s.p95Ms}ms max ${s.maxMs}ms  $${s.costUsd}  served by ${providers}`);
+    const signals = Object.entries(s.signals ?? {}).filter(([, n]) => n > 0).map(([c, n]) => `${c} ${n}`).join(', ') || 'none';
+    console.log(`  ${surface.padEnd(11)} delivered ${s.delivered}/${s.n} (content rejects ${s.rejectedWithOutput})  fails: ${fails}  signals: ${signals}  p50 ${s.p50Ms}ms p95 ${s.p95Ms}ms max ${s.maxMs}ms  $${s.costUsd}  served by ${providers}`);
   }
   if (CHECKS) console.log(`  checks: ${Object.entries(CHECKS).map(([c, d]) => `${c} = ${d}`).join('; ')}`);
+  if (SIGNALS) console.log(`  signals (tracked, not gated): ${Object.entries(SIGNALS).map(([c, d]) => `${c} = ${d}`).join('; ')}`);
 }
 
 if (!live) {
-  const { CHECKS } = await import('./lib/brief-model-eval.mjs');
+  const { CHECKS, SIGNALS } = await import('./lib/brief-model-eval.mjs');
   const runs = Object.entries(fixture.runs);
   if (runs.length === 0) console.log('no captured runs; pass --live to measure');
-  runs.forEach(([name, run], i) => printRun(name, run, i === runs.length - 1 ? CHECKS : null));
+  runs.forEach(([name, run], i) => (i === runs.length - 1 ? printRun(name, run, CHECKS, SIGNALS) : printRun(name, run)));
   process.exit(0);
 }
 
@@ -118,7 +120,7 @@ globalThis.fetch = async (url, init) => {
 const require = createRequire(import.meta.url);
 const { callLLM } = require('./lib/llm-chain.cjs');
 const brief = await import('./lib/brief-llm.mjs');
-const { checkSample, maskDates, promptSha, summarizeRun, CHECKS } = await import('./lib/brief-model-eval.mjs');
+const { checkSample, maskDates, promptSha, summarizeRun, CHECKS, SIGNALS } = await import('./lib/brief-model-eval.mjs');
 
 const canary = fixture.pools[Object.keys(fixture.pools)[0]].stories;
 const prompts = [
@@ -161,9 +163,10 @@ await Promise.all(Array.from({ length: CONCURRENCY }, async () => {
         return raw;
       },
     };
-    const out = await sampleContext.run(sample, () => job.run(deps).catch(() => null));
-    sample.fails = checkSample({ surface: job.surface, raw, delivered: out != null, stories: job.stories });
+    const output = await sampleContext.run(sample, () => job.run(deps).catch(() => null));
+    Object.assign(sample, checkSample({ surface: job.surface, raw, output, stories: job.stories }));
     sample.raw = raw;
+    sample.output = output ?? null;
     samples.push(sample);
     process.stdout.write('.');
   }
@@ -184,7 +187,7 @@ const run = {
   samples,
 };
 console.log('');
-printRun(capture || 'live run', run, CHECKS);
+printRun(capture || 'live run', run, CHECKS, SIGNALS);
 const cost = samples.reduce((s, r) => s + (r.costUsd ?? 0), 0);
 console.log(`\n${((Date.now() - startedAt) / 1000).toFixed(1)}s, $${cost.toFixed(4)}, ${samples.length} calls`);
 
