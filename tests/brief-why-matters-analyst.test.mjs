@@ -1367,7 +1367,7 @@ describe('endpoint: invented tenure qualifiers are repaired before caching', () 
     );
     assert.equal(response.status, 200);
     assert.equal(body.whyMatters, captured.replace(/^Former /, ''));
-    const redisUrls = fetchCalls.filter(({ url }) => url.startsWith('https://redis.example.test')).map(({ url }) => decodeURIComponent(url));
+    const redisUrls = fetchCalls.filter(({ url }) => new URL(url).host === 'redis.example.test').map(({ url }) => decodeURIComponent(url));
     assert.ok(redisUrls.some((u) => u.includes('brief:llm:whymatters:v12:')), `expected a v12 cache touch, got ${redisUrls.join(' | ')}`);
     assert.ok(!redisUrls.some((u) => u.includes('brief:llm:whymatters:v11:')), 'v11 rows predate the repair and must not be read');
   });
