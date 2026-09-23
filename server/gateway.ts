@@ -366,6 +366,7 @@ const RPC_CACHE_TIER: Record<string, CacheTier> = {
   '/api/economic/v1/get-us-cpi-monthly': 'daily',
   '/api/economic/v1/get-us-treasury-par-yield-curve': 'daily',
   '/api/economic/v1/get-us-interest-rates': 'daily',
+  '/api/economic/v1/get-world-cpi-monthly': 'daily',
   '/api/supply-chain/v1/get-critical-minerals': 'daily',
   '/api/supply-chain/v1/get-mineral-production': 'daily',
   '/api/military/v1/get-aircraft-details': 'static',

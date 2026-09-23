@@ -963,6 +963,39 @@ export interface UsInterestRateObservation {
   percent: number;
 }
 
+export interface GetWorldCpiMonthlyRequest {
+  history: boolean;
+  country: string;
+}
+
+export interface GetWorldCpiMonthlyResponse {
+  countries: WorldCpiCountry[];
+  unavailable: boolean;
+}
+
+export interface WorldCpiCountry {
+  country: string;
+  source: string;
+  frequency: string;
+  indexBase: string;
+  periods: WorldCpiPeriod[];
+}
+
+export interface WorldCpiPeriod {
+  period: number;
+  reading?: WorldCpiReading;
+}
+
+export interface WorldCpiReading {
+  index: number;
+  periodOverPeriod?: WorldCpiPercentChange;
+  yearOverYear?: WorldCpiPercentChange;
+}
+
+export interface WorldCpiPercentChange {
+  percent: number;
+}
+
 export interface FieldViolation {
   field: string;
   description: string;
@@ -1818,6 +1851,32 @@ export class EconomicServiceClient {
     }
 
     return await resp.json() as GetUsInterestRatesResponse;
+  }
+
+  async getWorldCpiMonthly(req: GetWorldCpiMonthlyRequest, options?: EconomicServiceCallOptions): Promise<GetWorldCpiMonthlyResponse> {
+    let path = "/api/economic/v1/get-world-cpi-monthly";
+    const params = new URLSearchParams();
+    if (req.history) params.set("history", String(req.history));
+    if (req.country != null && req.country !== "") params.set("country", String(req.country));
+    const url = this.baseURL + path + (params.toString() ? "?" + params.toString() : "");
+
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      ...this.defaultHeaders,
+      ...options?.headers,
+    };
+
+    const resp = await this.fetchFn(url, {
+      method: "GET",
+      headers,
+      signal: options?.signal,
+    });
+
+    if (!resp.ok) {
+      return this.handleError(resp);
+    }
+
+    return await resp.json() as GetWorldCpiMonthlyResponse;
   }
 
   private async handleError(resp: Response): Promise<never> {

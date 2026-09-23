@@ -2,7 +2,7 @@
 // Source: proto/worldmonitor/**/*.proto buf.validate annotations.
 
 export const GENERATED_PROTO_VALIDATION_RULE_COUNT = 621;
-export const GENERATED_REQUEST_METHOD_COUNT = 172;
+export const GENERATED_REQUEST_METHOD_COUNT = 173;
 
 export const GENERATED_REQUEST_TYPES = {
   "analyzeStock": "worldmonitor.market.v1.AnalyzeStockRequest",
@@ -97,6 +97,7 @@ export const GENERATED_REQUEST_TYPES = {
   "getVesselSnapshot": "worldmonitor.maritime.v1.GetVesselSnapshotRequest",
   "getWebcamImage": "worldmonitor.webcam.v1.GetWebcamImageRequest",
   "getWingbitsLiveFlight": "worldmonitor.military.v1.GetWingbitsLiveFlightRequest",
+  "getWorldCpiMonthly": "worldmonitor.economic.v1.GetWorldCpiMonthlyRequest",
   "getYoutubeLiveStreamInfo": "worldmonitor.aviation.v1.GetYoutubeLiveStreamInfoRequest",
   "importMonitoredCompanyBatch": "worldmonitor.company_monitoring.v1.ImportMonitoredCompanyBatchRequest",
   "listAcledEvents": "worldmonitor.conflict.v1.ListAcledEventsRequest",
@@ -1045,6 +1046,14 @@ export const GENERATED_MESSAGE_RULES = {
   },
   "worldmonitor.economic.v1.GetUsTreasuryParYieldCurveRequest": {
     "fields": {}
+  },
+  "worldmonitor.economic.v1.GetWorldCpiMonthlyRequest": {
+    "fields": {
+      "country": {
+        "kind": "string",
+        "stringMaxBytes": 65536
+      }
+    }
   },
   "worldmonitor.economic.v1.ListGlobalTendersRequest": {
     "fields": {

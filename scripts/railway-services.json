@@ -704,6 +704,7 @@
       "scripts/_seed-utils.mjs",
       "scripts/_upstash-rest.mjs",
       "scripts/_wb-country-dict-content-age-helpers.mjs",
+      "scripts/_world-cpi-shared.mjs",
       "scripts/china-macro/adapters.mjs",
       "scripts/china-macro/calendar.mjs",
       "scripts/china-macro/snapshot-builder.mjs",
@@ -741,9 +742,14 @@
       "scripts/seed-physical-premiums.mjs",
       "scripts/seed-statcan-wds.mjs",
       "scripts/seed-us-cpi.mjs",
-      "scripts/seed-us-treasury-par-yield.mjs",
       "scripts/seed-us-interest-rates.mjs",
+      "scripts/seed-us-treasury-par-yield.mjs",
       "scripts/seed-wb-external-debt.mjs",
+      "scripts/seed-world-cpi-abs.mjs",
+      "scripts/seed-world-cpi-estat.mjs",
+      "scripts/seed-world-cpi-eurostat.mjs",
+      "scripts/seed-world-cpi-imf.mjs",
+      "scripts/seed-world-cpi-oecd.mjs",
       "scripts/shared/compare-and-delete-script.cjs",
       "scripts/shared/country-names.json",
       "scripts/shared/iso2-to-iso3.json",
@@ -751,7 +757,8 @@
       "scripts/shared/physical-divergence-contract.js",
       "scripts/shared/physical-divergence-staleness.js",
       "scripts/shared/sovereign-status.json",
-      "shared/iso2-to-iso3.json"
+      "shared/iso2-to-iso3.json",
+      "shared/iso3-to-iso2.json"
     ],
     "cronSchedule": "0 8,9 * * *",
     "documentedAt": "docs/railway-seed-consolidation-runbook.md#bundle-8-seed-bundle-macro"
