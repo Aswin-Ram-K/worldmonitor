@@ -2,7 +2,7 @@
 // Source: proto/worldmonitor/**/*.proto buf.validate annotations.
 
 export const GENERATED_PROTO_VALIDATION_RULE_COUNT = 621;
-export const GENERATED_REQUEST_METHOD_COUNT = 172;
+export const GENERATED_REQUEST_METHOD_COUNT = 173;
 
 export const GENERATED_REQUEST_TYPES = {
   "analyzeStock": "worldmonitor.market.v1.AnalyzeStockRequest",
@@ -55,6 +55,7 @@ export const GENERATED_REQUEST_TYPES = {
   "getFuelShortageDetail": "worldmonitor.supply_chain.v1.GetFuelShortageDetailRequest",
   "getGdeltTopicTimeline": "worldmonitor.intelligence.v1.GetGdeltTopicTimelineRequest",
   "getGivingSummary": "worldmonitor.giving.v1.GetGivingSummaryRequest",
+  "getGovernmentYieldCurve": "worldmonitor.economic.v1.GetGovernmentYieldCurveRequest",
   "getHumanitarianSummary": "worldmonitor.conflict.v1.GetHumanitarianSummaryRequest",
   "getHumanitarianSummaryBatch": "worldmonitor.conflict.v1.GetHumanitarianSummaryBatchRequest",
   "getInsiderTransactions": "worldmonitor.market.v1.GetInsiderTransactionsRequest",
@@ -1033,6 +1034,14 @@ export const GENERATED_MESSAGE_RULES = {
         "kind": "string",
         "required": true,
         "stringMinLen": 1,
+        "stringMaxBytes": 65536
+      }
+    }
+  },
+  "worldmonitor.economic.v1.GetGovernmentYieldCurveRequest": {
+    "fields": {
+      "country": {
+        "kind": "string",
         "stringMaxBytes": 65536
       }
     }

@@ -57,7 +57,7 @@ World Monitor is useful for investors, portfolio managers, energy and commodity 
 
 Coverage reconciled: 2026-09-22. Every figure below is generated from this repository's authoritative registries by `npm run build:ai-search` — the same registries that produce https://www.worldmonitor.app/sources/.
 
-- 750 active data providers across 764 observed source hosts (335 structured/API, 461 news & OSINT feed, 30 operational-status; a host can be more than one), grouped into 10 signal domains — full catalog at https://www.worldmonitor.app/sources/
+- 758 active data providers across 772 observed source hosts (343 structured/API, 461 news & OSINT feed, 30 operational-status; a host can be more than one), grouped into 10 signal domains — full catalog at https://www.worldmonitor.app/sources/
 - 729 feed definitions in the shared feed registry — distinct from the 461 feed-publishing hosts above, since one host can back several feed definitions
 - 40 named live data streams whose staleness is tracked and surfaced individually — a different axis from the 10 signal domains above, which group the source catalog by subject
 - 58 map layer types in the shared registry, 57 of them reachable in the full variant — the homepage publishes the full-variant figure; the remaining 1 is sunset or build-flag gated

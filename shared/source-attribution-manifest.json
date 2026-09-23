@@ -1060,6 +1060,20 @@
       ]
     },
     {
+      "host": "api.riksbank.se",
+      "provider": "api.riksbank.se",
+      "kind": "structured",
+      "observed": true,
+      "license": "Provider terms for this upstream API/dataset; verify before redistribution",
+      "attribution": "Credit api.riksbank.se and link to the original upstream API/dataset.",
+      "status": "terms-review",
+      "references": [
+        {
+          "path": "scripts/seed-yield-curve-se.mjs"
+        }
+      ]
+    },
+    {
       "host": "api.safecast.org",
       "provider": "Safecast",
       "kind": "structured",
@@ -1129,6 +1143,20 @@
       "references": [
         {
           "path": "scripts/seed-gold-etf-flows.mjs"
+        }
+      ]
+    },
+    {
+      "host": "api.statistiken.bundesbank.de",
+      "provider": "api.statistiken.bundesbank.de",
+      "kind": "structured",
+      "observed": true,
+      "license": "Provider terms for this upstream API/dataset; verify before redistribution",
+      "attribution": "Credit api.statistiken.bundesbank.de and link to the original upstream API/dataset.",
+      "status": "terms-review",
+      "references": [
+        {
+          "path": "scripts/seed-yield-curve-de.mjs"
         }
       ]
     },
@@ -2857,6 +2885,20 @@
       ]
     },
     {
+      "host": "data.norges-bank.no",
+      "provider": "data.norges-bank.no",
+      "kind": "structured",
+      "observed": true,
+      "license": "Provider terms for this upstream API/dataset; verify before redistribution",
+      "attribution": "Credit data.norges-bank.no and link to the original upstream API/dataset.",
+      "status": "terms-review",
+      "references": [
+        {
+          "path": "scripts/seed-yield-curve-no.mjs"
+        }
+      ]
+    },
+    {
       "host": "data.sec.gov",
       "provider": "SEC EDGAR",
       "kind": "structured",
@@ -2867,6 +2909,20 @@
       "references": [
         {
           "path": "server/_shared/sec-edgar.ts"
+        }
+      ]
+    },
+    {
+      "host": "data.snb.ch",
+      "provider": "data.snb.ch",
+      "kind": "structured",
+      "observed": true,
+      "license": "Provider terms for this upstream API/dataset; verify before redistribution",
+      "attribution": "Credit data.snb.ch and link to the original upstream API/dataset.",
+      "status": "terms-review",
+      "references": [
+        {
+          "path": "scripts/seed-yield-curve-ch.mjs"
         }
       ]
     },
@@ -4382,6 +4438,20 @@
       "references": [
         {
           "path": "src/config/feeds.ts"
+        }
+      ]
+    },
+    {
+      "host": "fred.stlouisfed.org",
+      "provider": "fred.stlouisfed.org",
+      "kind": "structured",
+      "observed": true,
+      "license": "Provider terms for this upstream API/dataset; verify before redistribution",
+      "attribution": "Credit fred.stlouisfed.org and link to the original upstream API/dataset.",
+      "status": "terms-review",
+      "references": [
+        {
+          "path": "scripts/seed-oecd-lt-rates.mjs"
         }
       ]
     },
@@ -10754,6 +10824,23 @@
       "references": [
         {
           "path": "scripts/lib/boc-valet.mjs"
+        },
+        {
+          "path": "scripts/seed-yield-curve-ca.mjs"
+        }
+      ]
+    },
+    {
+      "host": "www.bankofengland.co.uk",
+      "provider": "www.bankofengland.co.uk",
+      "kind": "structured",
+      "observed": true,
+      "license": "Provider terms for this upstream API/dataset; verify before redistribution",
+      "attribution": "Credit www.bankofengland.co.uk and link to the original upstream API/dataset.",
+      "status": "terms-review",
+      "references": [
+        {
+          "path": "scripts/seed-yield-curve-gb.mjs"
         }
       ]
     },
@@ -12587,6 +12674,20 @@
       ]
     },
     {
+      "host": "www.mof.go.jp",
+      "provider": "www.mof.go.jp",
+      "kind": "structured",
+      "observed": true,
+      "license": "Provider terms for this upstream API/dataset; verify before redistribution",
+      "attribution": "Credit www.mof.go.jp and link to the original upstream API/dataset.",
+      "status": "terms-review",
+      "references": [
+        {
+          "path": "scripts/seed-yield-curve-jp.mjs"
+        }
+      ]
+    },
+    {
       "host": "www.myjoyonline.com",
       "provider": "www.myjoyonline.com",
       "kind": "feed",
@@ -13111,6 +13212,20 @@
         },
         {
           "path": "src/config/feeds.ts"
+        }
+      ]
+    },
+    {
+      "host": "www.rba.gov.au",
+      "provider": "www.rba.gov.au",
+      "kind": "structured",
+      "observed": true,
+      "license": "Provider terms for this upstream API/dataset; verify before redistribution",
+      "attribution": "Credit www.rba.gov.au and link to the original upstream API/dataset.",
+      "status": "terms-review",
+      "references": [
+        {
+          "path": "scripts/seed-yield-curve-au.mjs"
         }
       ]
     },

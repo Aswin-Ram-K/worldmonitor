@@ -33,6 +33,7 @@ import { getChinaActivityNowcast } from './get-china-activity-nowcast';
 import { getUsCpiMonthly } from './get-us-cpi-monthly';
 import { getUsTreasuryParYieldCurve } from './get-us-treasury-par-yield-curve';
 import { getUsInterestRates } from './get-us-interest-rates';
+import { getGovernmentYieldCurve } from './get-government-yield-curve';
 
 export const economicHandler: EconomicServiceHandler = {
   getFredSeries,
@@ -68,4 +69,5 @@ export const economicHandler: EconomicServiceHandler = {
   getUsCpiMonthly,
   getUsTreasuryParYieldCurve,
   getUsInterestRates,
+  getGovernmentYieldCurve,
 };

@@ -458,6 +458,17 @@ const STANDALONE_KEYS = {
   usCpiMonthly:          'seed-meta:economic:us-cpi',
   usTreasuryParYield:    'seed-meta:economic:us-treasury-par-yield',
   usInterestRates:       'seed-meta:economic:us-interest-rates',
+  // Meta-only probes for the yield-curve bundle. Every market's history is
+  // sharded per year; the canonical payloads are too large to probe directly.
+  yieldCurveJp:          'seed-meta:economic:yield-curve-jp',
+  yieldCurveCa:          'seed-meta:economic:yield-curve-ca',
+  yieldCurveDe:          'seed-meta:economic:yield-curve-de',
+  yieldCurveGb:          'seed-meta:economic:yield-curve-gb',
+  yieldCurveAu:          'seed-meta:economic:yield-curve-au',
+  yieldCurveCh:          'seed-meta:economic:yield-curve-ch',
+  yieldCurveNo:          'seed-meta:economic:yield-curve-no',
+  yieldCurveSe:          'seed-meta:economic:yield-curve-se',
+  oecdLtRates:           'seed-meta:economic:oecd-lt-rates',
   // Authoritative shared cohort pointer read by all vulnerability RPCs. The
   // country and inverse manifests are compatibility projections; probing only
   // them can report OK while every public handler is unavailable.
@@ -1346,6 +1357,107 @@ const SEED_META = {
       fromKey: null,
       issue: 8485,
       activationKey: 'seed-activated:economic:us-interest-rates',
+    },
+  },
+  yieldCurveJp: {
+    key: 'seed-meta:economic:yield-curve-jp',
+    maxStaleMin: 4320, // daily business-day source; 72h covers the Fri→Mon gap. Curve content age is separate.
+    activationKey: 'seed-activated:economic:yield-curve-jp',
+    cutover: {
+      mode: 'activation-marker',
+      fromKey: null,
+      issue: 8522,
+      activationKey: 'seed-activated:economic:yield-curve-jp',
+    },
+  },
+  yieldCurveCa: {
+    key: 'seed-meta:economic:yield-curve-ca',
+    maxStaleMin: 4320,
+    activationKey: 'seed-activated:economic:yield-curve-ca',
+    cutover: {
+      mode: 'activation-marker',
+      fromKey: null,
+      issue: 8522,
+      activationKey: 'seed-activated:economic:yield-curve-ca',
+    },
+  },
+  yieldCurveDe: {
+    key: 'seed-meta:economic:yield-curve-de',
+    maxStaleMin: 4320,
+    activationKey: 'seed-activated:economic:yield-curve-de',
+    cutover: {
+      mode: 'activation-marker',
+      fromKey: null,
+      issue: 8522,
+      activationKey: 'seed-activated:economic:yield-curve-de',
+    },
+  },
+  // The GB cold start (39 MB BoE archive) can be budget-deferred behind the
+  // 570s bundle budget; 4460min still sits inside the 7d canonical TTL.
+  yieldCurveGb: {
+    key: 'seed-meta:economic:yield-curve-gb',
+    maxStaleMin: 4460,
+    activationKey: 'seed-activated:economic:yield-curve-gb',
+    cutover: {
+      mode: 'activation-marker',
+      fromKey: null,
+      issue: 8522,
+      activationKey: 'seed-activated:economic:yield-curve-gb',
+    },
+  },
+  yieldCurveAu: {
+    key: 'seed-meta:economic:yield-curve-au',
+    maxStaleMin: 4460,
+    activationKey: 'seed-activated:economic:yield-curve-au',
+    cutover: {
+      mode: 'activation-marker',
+      fromKey: null,
+      issue: 8522,
+      activationKey: 'seed-activated:economic:yield-curve-au',
+    },
+  },
+  yieldCurveCh: {
+    key: 'seed-meta:economic:yield-curve-ch',
+    maxStaleMin: 4460,
+    activationKey: 'seed-activated:economic:yield-curve-ch',
+    cutover: {
+      mode: 'activation-marker',
+      fromKey: null,
+      issue: 8522,
+      activationKey: 'seed-activated:economic:yield-curve-ch',
+    },
+  },
+  yieldCurveNo: {
+    key: 'seed-meta:economic:yield-curve-no',
+    maxStaleMin: 4320,
+    activationKey: 'seed-activated:economic:yield-curve-no',
+    cutover: {
+      mode: 'activation-marker',
+      fromKey: null,
+      issue: 8522,
+      activationKey: 'seed-activated:economic:yield-curve-no',
+    },
+  },
+  yieldCurveSe: {
+    key: 'seed-meta:economic:yield-curve-se',
+    maxStaleMin: 4460,
+    activationKey: 'seed-activated:economic:yield-curve-se',
+    cutover: {
+      mode: 'activation-marker',
+      fromKey: null,
+      issue: 8522,
+      activationKey: 'seed-activated:economic:yield-curve-se',
+    },
+  },
+  oecdLtRates: {
+    key: 'seed-meta:economic:oecd-lt-rates',
+    maxStaleMin: 60 * 24 * 21, // weekly section; 21d = 3x interval, matches monthly data cadence
+    activationKey: 'seed-activated:economic:oecd-lt-rates',
+    cutover: {
+      mode: 'activation-marker',
+      fromKey: null,
+      issue: 8522,
+      activationKey: 'seed-activated:economic:oecd-lt-rates',
     },
   },
   euFsi:             { key: 'seed-meta:economic:fsi-eu',               maxStaleMin: 5760 }, // daily seed (weekdays + holidays); 5760min = 96h = covers Wed→Mon Easter gap. Data freshness is tracked separately via content-age (STALE_CONTENT) — see seed-fsi-eu.mjs.
