@@ -734,7 +734,7 @@ const LEAD_SENTENCE_SPLIT = /(?<=(?<!\b\p{Lu})[.!?])\s+/u;
 // and "This development occurs as" were the 24/24 Sep 20 near-misses;
 // listing "this comes as" / "this declaration comes as" in the prompt
 // did not catch them. Word-bounded so "becomes as" is not a hit.
-const LEAD_STITCHING_STEM_RE = /\b(?:comes as|occurs as|meanwhile|at the same time|in other news|elsewhere|on another front|in a separate development)\b/i;
+export const LEAD_STITCHING_STEM_RE = /\b(?:comes as|occurs as|meanwhile|at the same time|in other news|elsewhere|on another front|in a separate development)\b/i;
 
 // LEAD_SENTENCE_SPLIT leaves "U.S. Navy" intact by not breaking after a
 // single capital + period. The same lookbehind glues a following stitch
