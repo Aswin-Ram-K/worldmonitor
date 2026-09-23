@@ -70,6 +70,7 @@ import {
   developmentsHasDatedItem,
   isBriefSectionHeader,
   normalizeFrozenDevelopments,
+  parseBriefSections,
 } from './crawlable-developments.mjs';
 
 // One predicate for the freeze's coverage counters and this build's
@@ -3330,16 +3331,15 @@ function briefHeadingText(heading, name) {
 
 // Sections a page shows from an evidence-grounded brief. Situation is left
 // out: it restates the Recent developments list rendered directly above it.
-function publishedBriefSections(brief) {
-  return (Array.isArray(brief?.sections) ? brief.sections : [])
-    .filter((section) => section.key !== 'situation' && Array.isArray(section.claims) && section.claims.length > 0);
+function publishedBriefSections(brief, country) {
+  return parseBriefSections(brief.text, country).filter((section) => section.key !== 'situation');
 }
 
 // Evidence-grounded brief (sections + World Monitor data points). Returns ''
 // when no section beyond Situation survived: an empty brief block tells a
 // reader nothing, so the page shows none.
-function renderStructuredIntelBrief(brief, name) {
-  const sections = publishedBriefSections(brief);
+function renderStructuredIntelBrief(brief, name, countryCode) {
+  const sections = publishedBriefSections(brief, { countryCode, countryName: name });
   if (sections.length === 0) return '';
   const citedSources = new Set();
   const citedEvidence = new Set();
@@ -3422,8 +3422,8 @@ export function renderCountryDevelopments({ countryCode = '', countryName, devel
   // A skipped or withheld brief renders nothing: the reason is pipeline
   // bookkeeping (it stays in the snapshot and the build log), and printing it
   // told readers the page had failed. The model id is never shown.
-  if (brief && Array.isArray(brief.sections)) {
-    const briefHtml = renderStructuredIntelBrief(brief, name);
+  if (brief && Array.isArray(brief.evidence)) {
+    const briefHtml = renderStructuredIntelBrief(brief, name, countryCode);
     if (briefHtml) parts.push(briefHtml);
   } else if (brief) {
     const briefHtml = formatCrawlableIntelBrief(brief.text, name);
@@ -3486,10 +3486,8 @@ function assertDevelopmentsBrief(brief) {
   if (citations.some((citation) => citation < 1 || citation > brief.sources.length)) {
     throw new Error('country developments brief carries an out-of-range source citation');
   }
-  if (brief.sections === undefined) return;
-  if (!Array.isArray(brief.sections) || !Array.isArray(brief.evidence)) {
-    throw new Error('country developments brief carries malformed sections or evidence');
-  }
+  if (brief.evidence === undefined) return;
+  if (!Array.isArray(brief.evidence)) throw new Error('country developments brief carries malformed evidence');
   const evidenceIds = new Set();
   for (const item of brief.evidence) {
     const valid = item && typeof item === 'object'
@@ -3499,14 +3497,6 @@ function assertDevelopmentsBrief(brief) {
       && (item.url === undefined || item.url === '' || isValidHttpsUrl(item.url));
     if (!valid) throw new Error('country developments brief evidence is missing id, label, value, fact text, ISO time, or an https URL');
     evidenceIds.add(item.id);
-  }
-  for (const section of brief.sections) {
-    const claims = Array.isArray(section?.claims) ? section.claims : [];
-    const valid = typeof section?.key === 'string' && typeof section?.heading === 'string' && claims.length > 0
-      && claims.every((claim) => typeof claim?.text === 'string' && claim.text.trim()
-        && Array.isArray(claim.sourceIndexes) && claim.sourceIndexes.every((index) => Number.isInteger(index) && index >= 1 && index <= brief.sources.length)
-        && Array.isArray(claim.evidenceIds) && claim.evidenceIds.every((id) => evidenceIds.has(id)));
-    if (!valid) throw new Error('country developments brief section cites a source or data point it does not carry');
   }
   for (const match of brief.text.matchAll(/\[(E\d{1,2})\]/g)) {
     if (!evidenceIds.has(match[1])) throw new Error('country developments brief cites evidence it does not carry');
@@ -3586,11 +3576,11 @@ export function assertCountryDevelopmentsRendered({
       throw new Error(`${pagePath} dropped frozen headline ${headline.url}`);
     }
   }
-  if (rows.brief && Array.isArray(rows.brief.sections)) {
+  if (rows.brief && Array.isArray(rows.brief.evidence)) {
     // Structured briefs render their non-Situation claims; every one must
     // reach the page, and a brief with none renders no block to check.
     const pageText = html.replace(/<[^>]+>/g, '');
-    for (const section of publishedBriefSections(rows.brief)) {
+    for (const section of publishedBriefSections(rows.brief, { countryCode, countryName })) {
       for (const claim of section.claims) {
         if (!pageText.includes(escapeHtml(claim.text))) {
           throw new Error(`${pagePath} dropped its frozen intel brief`);

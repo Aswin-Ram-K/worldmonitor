@@ -366,8 +366,7 @@ function countryPayload() {
           model: 'test-model',
           generatedAt: Object.hasOwn(override, 'generatedAt') ? override.generatedAt : Date.now(),
           sources,
-          sections: override.sections || [],
-          evidence: override.evidence || [],
+          ...(Object.hasOwn(override, 'evidence') ? { evidence: override.evidence } : {}),
         });
       }
       if (href.includes('get-intel-timeline')) {
@@ -1756,22 +1755,18 @@ describe('freeze per-country developments capture', () => {
       factText: 'Sudan has a Country Instability Index score of 72.5 of 100, in the High band, as of Sep 21, 2026.',
       asOf: '2026-09-21T04:46:00.000Z', url,
     }];
-    const sections = (riskEvidenceIds = ['E1'], situationSources = [1]) => [
-      { key: 'situation', heading: 'SITUATION NOW', claims: [{ text: SITUATION, sourceIndexes: situationSources, evidenceIds: [] }] },
-      { key: 'risks', heading: 'KEY RISKS', claims: [{ text: RISK, sourceIndexes: [], evidenceIds: riskEvidenceIds }] },
-    ];
     const brief = (marker = 'E1') => `SITUATION NOW\n${SITUATION} [1]\n\nKEY RISKS\n${RISK} [${marker}]`;
 
-    it('freezes sections and cited evidence, never the model id', async () => {
+    it('freezes the text and cited evidence, never the model id', async () => {
       stubFetch({
         digestItems: countryDigestItems(),
-        briefOverrides: { SD: { brief: brief(), sections: sections(), evidence: evidence('http://insecure.test/cii') } },
+        briefOverrides: { SD: { brief: brief(), evidence: evidence('http://insecure.test/cii') } },
       });
       const { snapshot } = await runFreeze({ serviceKey: 'test-key' });
       const frozen = snapshot.countries.SD.developments.brief;
       assert.ok(frozen, JSON.stringify(snapshot.errors.developments));
       assert.equal(Object.hasOwn(frozen, 'model'), false);
-      assert.deepEqual(frozen.sections, sections());
+      assert.equal(frozen.text, brief());
       assert.equal(frozen.evidence.length, 1);
       assert.equal(Object.hasOwn(frozen.evidence[0], 'url'), false, 'a non-https evidence URL is dropped');
       assert.equal(frozen.evidence[0].factText, evidence()[0].factText);
@@ -1780,7 +1775,7 @@ describe('freeze per-country developments capture', () => {
     it('rejects a brief citing evidence it did not return', async () => {
       stubFetch({
         digestItems: countryDigestItems(),
-        briefOverrides: { SD: { brief: brief('E9'), sections: sections(['E9']), evidence: evidence() } },
+        briefOverrides: { SD: { brief: brief('E9'), evidence: evidence() } },
       });
       const { snapshot } = await runFreeze({ serviceKey: 'test-key' });
       assert.equal(snapshot.countries.SD.developments.brief, null);
@@ -1789,16 +1784,10 @@ describe('freeze per-country developments capture', () => {
       )), JSON.stringify(snapshot.errors.developments));
     });
 
-    it('rejects a section claim citing a source outside the returned list', async () => {
-      stubFetch({
-        digestItems: countryDigestItems(),
-        briefOverrides: { SD: { brief: brief(), sections: sections(['E1'], [9]), evidence: evidence() } },
-      });
+    it('keeps pre-migration responses in the legacy shape', async () => {
+      stubFetch({ digestItems: countryDigestItems(), briefOverrides: { SD: { brief: `SITUATION NOW\n${SITUATION} [1]` } } });
       const { snapshot } = await runFreeze({ serviceKey: 'test-key' });
-      assert.equal(snapshot.countries.SD.developments.brief, null);
-      assert.ok(snapshot.errors.developments.some((entry) => (
-        entry.code === 'SD' && entry.stage === 'brief' && entry.message.includes('invalid section')
-      )), JSON.stringify(snapshot.errors.developments));
+      assert.equal(Object.hasOwn(snapshot.countries.SD.developments.brief, 'evidence'), false);
     });
   });
 

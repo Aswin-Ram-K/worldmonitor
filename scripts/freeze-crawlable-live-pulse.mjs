@@ -498,8 +498,15 @@ function briefRecord(payload, digestUrls) {
   if (citations.some((citation) => citation < 1 || citation > normalizedSources.length)) {
     throw new Error('brief response carried an out-of-range source citation');
   }
-  const evidence = briefEvidenceRecords(payload?.evidence);
-  const sections = briefSectionRecords(payload?.sections, normalizedSources.length, new Set(evidence.map((item) => item.id)));
+  // An evidence-grounded brief always returns an evidence array (possibly
+  // empty); its presence is what marks the text as the sectioned format.
+  const evidence = Array.isArray(payload?.evidence) ? briefEvidenceRecords(payload.evidence) : null;
+  if (evidence) {
+    const ids = new Set(evidence.map((item) => item.id));
+    for (const match of text.matchAll(/\[(E\d{1,2})\]/g)) {
+      if (!ids.has(match[1])) throw new Error(`brief response cited evidence it did not return: ${match[1]}`);
+    }
+  }
   return {
     text,
     generatedAt: new Date(generatedMs).toISOString(),
@@ -509,7 +516,7 @@ function briefRecord(payload, digestUrls) {
     sources: normalizedSources,
     // The model id is deliberately not frozen: pages credit an automated
     // summary, not a vendor model.
-    ...(sections.length > 0 ? { sections, evidence } : {}),
+    ...(evidence ? { evidence } : {}),
   };
 }
 
@@ -518,8 +525,6 @@ function briefRecord(payload, digestUrls) {
 // same text, so it is frozen verbatim. A non-https link is dropped, not the
 // item: the value stands without it.
 function briefEvidenceRecords(value) {
-  if (value === undefined || value === null) return [];
-  if (!Array.isArray(value)) throw new Error('brief response carried malformed evidence');
   return value.map((item) => {
     const id = String(item?.id || '').trim();
     const fields = ['kind', 'label', 'value', 'factText'].map((field) => String(item?.[field] || '').trim());
@@ -530,34 +535,6 @@ function briefEvidenceRecords(value) {
     const [kind, label, displayValue, factText] = fields;
     const url = normalizeHttpsUrl(item?.url);
     return { id, kind, label, value: displayValue, factText, asOf: new Date(asOfMs).toISOString(), ...(url ? { url } : {}) };
-  });
-}
-
-function briefSectionRecords(value, sourceCount, evidenceIds) {
-  if (value === undefined || value === null) return [];
-  if (!Array.isArray(value)) throw new Error('brief response carried an invalid section');
-  return value.map((section) => {
-    const key = String(section?.key || '').trim();
-    const heading = String(section?.heading || '').trim();
-    const claims = Array.isArray(section?.claims) ? section.claims : null;
-    if (!key || !heading || !claims || claims.length === 0) throw new Error('brief response carried an invalid section');
-    return {
-      key,
-      heading,
-      claims: claims.map((claim) => {
-        const text = String(claim?.text || '').trim();
-        const sourceIndexes = Array.isArray(claim?.sourceIndexes) ? claim.sourceIndexes : null;
-        const citedEvidence = Array.isArray(claim?.evidenceIds) ? claim.evidenceIds : null;
-        if (!text || !sourceIndexes || !citedEvidence) throw new Error('brief response carried an invalid section claim');
-        if (sourceIndexes.some((index) => !Number.isInteger(index) || index < 1 || index > sourceCount)) {
-          throw new Error('brief response carried an invalid section claim citing an out-of-range source');
-        }
-        if (citedEvidence.some((id) => !evidenceIds.has(id))) {
-          throw new Error('brief response carried an invalid section claim citing unreturned evidence');
-        }
-        return { text, sourceIndexes: [...sourceIndexes], evidenceIds: [...citedEvidence] };
-      }),
-    };
   });
 }
 

@@ -2224,7 +2224,7 @@ describe('country intel brief caching behavior', { concurrency: 1 }, () => {
     }
   });
 
-  it('grounds analytical sections in the evidence pack and returns them structured', async () => {
+  it('grounds analytical sections in the evidence pack and returns the cited evidence', async () => {
     const { module, cleanup } = await importCountryIntelBrief({ premium: true });
     const restoreEnv = withEnv(INTEL_TEST_ENV);
     const originalFetch = globalThis.fetch;
@@ -2255,7 +2255,6 @@ describe('country intel brief caching behavior', { concurrency: 1 }, () => {
       assert.match(userPrompts[0], /World Monitor data points:\n\[E1\] \(advisory\) .*Exercise Increased Caution/);
       assert.match(systemPrompts[0], /never use a number from a headline/);
       assert.equal(out.brief, `SITUATION NOW\nFinland completes border fence [1]\n\nKEY RISKS\n${risk} [E1]`);
-      assert.deepEqual(out.sections.map((section) => section.key), ['situation', 'risks']);
       assert.deepEqual(out.evidence.map((item) => [item.id, item.kind, item.value]), [['E1', 'advisory', 'Exercise Increased Caution']]);
       assert.doesNotMatch(out.brief, /do not establish|withheld/i);
     } finally {
@@ -2571,7 +2570,7 @@ describe('country intel brief caching behavior', { concurrency: 1 }, () => {
       assert.equal(userPrompts.length, 0);
       assert.equal(first.brief, '');
       assert.equal(second.brief, '');
-      assert.deepEqual(first.sections, []);
+      assert.deepEqual(first.evidence, []);
       assert.ok(setKeys.every((key) => key.startsWith('ci-sebuf:v9:US:en:shared')), `anon callers land on the shared key, got ${setKeys}`);
     } finally {
       cleanup();

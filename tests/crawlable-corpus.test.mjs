@@ -5924,7 +5924,6 @@ describe('country recent developments', () => {
           ...sections.flatMap((section) => [section.heading, ...section.claims.map((claim) => `${claim.text} ${[...claim.sourceIndexes.map((i) => `[${i}]`), ...claim.evidenceIds.map((id) => `[${id}]`)].join('')}`)])].join('\n'),
         generatedAt: BRIEF.generatedAt,
         sources: BRIEF.sources,
-        sections: [{ key: 'situation', heading: 'SITUATION NOW', claims: [{ text: 'Sudan aid convoy reaches Darfur amid talks', sourceIndexes: [1], evidenceIds: [] }] }, ...sections],
         evidence: EVIDENCE,
       },
     });
@@ -5968,7 +5967,7 @@ describe('country recent developments', () => {
       const tampered = renderCountryDevelopments({ countryCode: 'SD', countryName: 'Sudan', developments }).replace('72.5 of 100', '95 of 100');
       assert.throws(() => assertCountryBriefPresentation({ pagePath: '/countries/sudan/', html: tampered, sources: developments.brief.sources, evidence: EVIDENCE }), /unsupported citation/);
       assert.throws(() => renderCountryDevelopments({ countryCode: 'SD', countryName: 'Sudan', developments: {
-        ...developments, brief: { ...developments.brief, sections: [{ ...RISKS, claims: [{ ...RISKS.claims[0], evidenceIds: ['E9'] }] }] },
+        ...developments, brief: { ...developments.brief, text: developments.brief.text.replace('[E1]', '[E9]') },
       } }), /does not carry/);
     });
 
@@ -7611,7 +7610,7 @@ it('retains API country-name aliases through the final country page renderer', a
     assert.equal(rendered.sections.length, 2, `${code}: both claims must survive validation`);
     const { text } = rendered;
     const livePulse = structuredClone(data.livePulse);
-    livePulse.countries[code].developments = { headlines: sources, brief: { text, sources, sections: rendered.sections, evidence: rendered.evidence, generatedAt: capturedAt }, timeline: [] };
+    livePulse.countries[code].developments = { headlines: sources, brief: { text, sources, evidence: rendered.evidence, generatedAt: capturedAt }, timeline: [] };
     const html = renderCountryPage({
       country, baseUrl: 'https://www.worldmonitor.app', capturedAt: data.resilience.capturedAt,
       lastmod: data.lastmod.countries, methodologyFormula: data.resilience.methodologyFormula,

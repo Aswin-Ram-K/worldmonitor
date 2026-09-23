@@ -12,6 +12,7 @@ import {
   MIN_BRIEF_GROUNDING_PUBLISHERS,
   normalizeBriefText,
   normalizeFrozenDevelopments,
+  parseBriefSections,
   registrableDomain,
 } from '../scripts/crawlable-developments.mjs';
 import { isVerifiableArticleUrl as freezeIsVerifiableArticleUrl } from '../scripts/freeze-crawlable-live-pulse.mjs';
@@ -423,6 +424,22 @@ describe('evidence-grounded briefs', () => {
     ]) {
       assert.ok(briefCitationGroundingGap(brief(`SITUATION NOW\nEgypt stands firm on Gaza ceasefire [1]\nKEY RISKS\n${line}`)), line);
     }
+  });
+
+  it('parses the server-rendered text back into sections and claims', () => {
+    const text = [
+      'SITUATION NOW', 'Egypt stands firm on Gaza ceasefire [1]', '',
+      'WHAT THIS MEANS FOR EGYPT', 'Egypt agrees to South Sudan dam while linked to the Suez Canal chokepoint. [2][E2]', '',
+      'KEY RISKS', "Egypt's fiscal space scores 28 of 100 in the Country Resilience Index. [E1]", 'An uncited line',
+    ].join('\n');
+    assert.deepEqual(parseBriefSections(text, { countryCode: 'EG', countryName: 'Egypt' }), [
+      { key: 'situation', heading: 'SITUATION NOW', claims: [{ text: 'Egypt stands firm on Gaza ceasefire', sourceIndexes: [1], evidenceIds: [] }] },
+      { key: 'implications', heading: 'WHAT THIS MEANS FOR EGYPT', claims: [{ text: 'Egypt agrees to South Sudan dam while linked to the Suez Canal chokepoint.', sourceIndexes: [2], evidenceIds: ['E2'] }] },
+      { key: 'risks', heading: 'KEY RISKS', claims: [
+        { text: "Egypt's fiscal space scores 28 of 100 in the Country Resilience Index.", sourceIndexes: [], evidenceIds: ['E1'] },
+        { text: 'An uncited line', sourceIndexes: [], evidenceIds: [] },
+      ] },
+    ]);
   });
 
   it('still requires at least one headline citation', () => {

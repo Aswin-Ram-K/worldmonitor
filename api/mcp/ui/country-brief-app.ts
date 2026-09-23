@@ -8,7 +8,7 @@
 // get-country-intel-brief handler emits CAMELCASE identity fields
 // (`countryCode` + a resolved `countryName`), NOT `country_code`:
 //   { countryCode, countryName, brief: string, model, generatedAt,
-//     sources: [{ title, url, source, publishedAt }], sections, evidence }
+//     sources: [{ title, url, source, publishedAt }], evidence }
 // `model` is deliberately never rendered.
 // The title read below prefers `countryName`, then resolves `countryCode`
 // via Intl, and still tolerates a legacy `country_code` for safety.

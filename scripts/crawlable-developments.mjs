@@ -244,6 +244,45 @@ export function briefCitationGroundingGap(brief, country = {}, { requireHeadline
   return citationCount > 0 ? null : 'missing citations';
 }
 
+const SECTION_KEYS = new Map([
+  ['SITUATION NOW', 'situation'],
+  ['KEY RISKS', 'risks'],
+  ['OUTLOOK', 'outlook'],
+  ['WATCH ITEMS', 'watch'],
+]);
+const CLAIM_LINE_RE = /^(.*\S)\s+((?:\[(?:\d{1,2}|E\d{1,2})\])+)$/;
+
+/**
+ * Sections of an evidence-grounded brief, parsed from its text. The server
+ * renders that text deterministically: a heading line per non-empty section,
+ * then one claim per line ending in its [n] and [En] markers. The API does not
+ * repeat the structure as a field because the public OpenAPI artifact is at
+ * its byte budget. A line without markers is kept as a claim citing nothing,
+ * which the grounding gate then rejects.
+ */
+export function parseBriefSections(text, country = {}) {
+  const sections = [];
+  for (const rawLine of normalizeBriefText(text, country).split('\n')) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    if (isBriefSectionHeader(line, country)) {
+      const heading = line.replace(/:\s*$/, '');
+      const upper = heading.toUpperCase();
+      sections.push({ key: SECTION_KEYS.get(upper) ?? (upper.startsWith('WHAT THIS MEANS FOR') ? 'implications' : 'other'), heading, claims: [] });
+      continue;
+    }
+    if (sections.length === 0) sections.push({ key: 'other', heading: '', claims: [] });
+    const match = line.match(CLAIM_LINE_RE);
+    const markers = match ? [...match[2].matchAll(/\[(\d{1,2}|E\d{1,2})\]/g)].map((marker) => marker[1]) : [];
+    sections.at(-1).claims.push({
+      text: match ? match[1] : line,
+      sourceIndexes: markers.filter((marker) => /^\d/.test(marker)).map(Number),
+      evidenceIds: markers.filter((marker) => marker.startsWith('E')),
+    });
+  }
+  return sections.filter((section) => section.claims.length > 0);
+}
+
 // True when the frozen developments carry at least one dated, sourced item:
 // a headline, a brief, or a timeline event. The dated-absence shape
 // (headlines: [], brief: null, timeline: [] or null) does not count. One

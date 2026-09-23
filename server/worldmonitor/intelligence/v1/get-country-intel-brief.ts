@@ -1,9 +1,7 @@
 import type {
   ServerContext,
   BriefSource as CountryIntelBriefSource,
-  BriefClaim,
   BriefEvidence,
-  BriefSection,
   GetCountryIntelBriefRequest,
   GetCountryIntelBriefResponse,
 } from '../../../../src/generated/server/worldmonitor/intelligence/v1/service_server';
@@ -44,6 +42,21 @@ export interface CountryBriefEvidenceInput {
   factText: string;
   asOf: string;
   url?: string;
+}
+
+// The response carries these as `brief` text (HEADING lines, then claim lines
+// ending in [n]/[En] markers), not as a structured field: the public OpenAPI
+// artifact sits at its byte budget, and the text already encodes them.
+interface BriefClaim {
+  text: string;
+  sourceIndexes: number[];
+  evidenceIds: string[];
+}
+
+interface BriefSection {
+  key: BriefSectionKey;
+  heading: string;
+  claims: BriefClaim[];
 }
 
 export interface EvidenceGroundedCountryBrief {
@@ -274,7 +287,6 @@ export async function getCountryIntelBrief(
     model: '',
     generatedAt: Date.now(),
     sources,
-    sections: [],
     evidence: [],
   };
 
@@ -529,7 +541,6 @@ Rules:
         model: llmResult.model,
         generatedAt: Date.now(),
         sources: entrySources,
-        sections: rendered?.sections ?? [],
         evidence: rendered?.evidence ?? [],
       };
     });

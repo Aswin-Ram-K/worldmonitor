@@ -7323,10 +7323,6 @@ components:
                     type: array
                     items:
                         $ref: '#/components/schemas/BriefSource'
-                sections:
-                    type: array
-                    items:
-                        $ref: '#/components/schemas/BriefSection'
                 evidence:
                     type: array
                     items:
@@ -7348,65 +7344,24 @@ components:
                     type: string
                     description: Article publication time, when available.
             description: BriefSource describes one article used to ground an AI-generated brief.
-        BriefSection:
-            type: object
-            properties:
-                key:
-                    type: string
-                    description: situation | implications | risks | outlook | watch
-                heading:
-                    type: string
-                    description: Display heading, e.g. KEY RISKS.
-                claims:
-                    type: array
-                    items:
-                        $ref: '#/components/schemas/BriefClaim'
-            description: BriefSection is one brief section with at least one surviving claim.
-        BriefClaim:
-            type: object
-            properties:
-                text:
-                    type: string
-                    description: One factual sentence, without citation markers.
-                sourceIndexes:
-                    type: array
-                    items:
-                        type: integer
-                        format: int32
-                        description: 1-based indexes into sources.
-                evidenceIds:
-                    type: array
-                    items:
-                        type: string
-                        description: Ids of cited evidence items (E1, E2, ...).
-            description: BriefClaim is one validated sentence of a brief and what it cites.
         BriefEvidence:
             type: object
             properties:
                 id:
                     type: string
-                    description: Stable id within the response, e.g. E1.
                 kind:
                     type: string
-                    description: |-
-                        cii | advisory | sanctions | resilience | resilience-dimension | energy |
-                         chokepoint | market | forecast
                 label:
                     type: string
-                    description: Human-readable label, e.g. Country Instability Index.
                 value:
                     type: string
-                    description: Display value, e.g. 27 of 100 (Low).
                 factText:
                     type: string
-                    description: The exact sentence claims citing this item are validated against.
                 asOf:
                     type: string
-                    description: When the value was observed, ISO 8601.
                 url:
                     type: string
-                    description: Public https link for the value, when one exists.
-            description: BriefEvidence is one World Monitor data point a claim may cite.
+            description: BriefEvidence is a data point a brief cites as [E1].
         GetCountryCoverageRequest:
             type: object
             properties:
