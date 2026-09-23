@@ -498,15 +498,67 @@ function briefRecord(payload, digestUrls) {
   if (citations.some((citation) => citation < 1 || citation > normalizedSources.length)) {
     throw new Error('brief response carried an out-of-range source citation');
   }
+  const evidence = briefEvidenceRecords(payload?.evidence);
+  const sections = briefSectionRecords(payload?.sections, normalizedSources.length, new Set(evidence.map((item) => item.id)));
   return {
     text,
-    model: String(payload?.model || ''),
     generatedAt: new Date(generatedMs).toISOString(),
     // Preserve the returned order exactly: [n] citations index this array.
     // Any invalid or unfrozen entry rejects the whole brief above rather than
     // being removed and silently shifting later citation indexes.
     sources: normalizedSources,
+    // The model id is deliberately not frozen: pages credit an automated
+    // summary, not a vendor model.
+    ...(sections.length > 0 ? { sections, evidence } : {}),
   };
+}
+
+// World Monitor data points an evidence-grounded brief cites. Claims were
+// validated against factText server-side; the corpus re-checks against the
+// same text, so it is frozen verbatim. A non-https link is dropped, not the
+// item: the value stands without it.
+function briefEvidenceRecords(value) {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) throw new Error('brief response carried malformed evidence');
+  return value.map((item) => {
+    const id = String(item?.id || '').trim();
+    const fields = ['kind', 'label', 'value', 'factText'].map((field) => String(item?.[field] || '').trim());
+    const asOfMs = new Date(String(item?.asOf || '')).getTime();
+    if (!/^E\d{1,2}$/.test(id) || fields.some((field) => !field) || !Number.isFinite(asOfMs)) {
+      throw new Error('brief response carried an invalid evidence item');
+    }
+    const [kind, label, displayValue, factText] = fields;
+    const url = normalizeHttpsUrl(item?.url);
+    return { id, kind, label, value: displayValue, factText, asOf: new Date(asOfMs).toISOString(), ...(url ? { url } : {}) };
+  });
+}
+
+function briefSectionRecords(value, sourceCount, evidenceIds) {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) throw new Error('brief response carried an invalid section');
+  return value.map((section) => {
+    const key = String(section?.key || '').trim();
+    const heading = String(section?.heading || '').trim();
+    const claims = Array.isArray(section?.claims) ? section.claims : null;
+    if (!key || !heading || !claims || claims.length === 0) throw new Error('brief response carried an invalid section');
+    return {
+      key,
+      heading,
+      claims: claims.map((claim) => {
+        const text = String(claim?.text || '').trim();
+        const sourceIndexes = Array.isArray(claim?.sourceIndexes) ? claim.sourceIndexes : null;
+        const citedEvidence = Array.isArray(claim?.evidenceIds) ? claim.evidenceIds : null;
+        if (!text || !sourceIndexes || !citedEvidence) throw new Error('brief response carried an invalid section claim');
+        if (sourceIndexes.some((index) => !Number.isInteger(index) || index < 1 || index > sourceCount)) {
+          throw new Error('brief response carried an invalid section claim citing an out-of-range source');
+        }
+        if (citedEvidence.some((id) => !evidenceIds.has(id))) {
+          throw new Error('brief response carried an invalid section claim citing unreturned evidence');
+        }
+        return { text, sourceIndexes: [...sourceIndexes], evidenceIds: [...citedEvidence] };
+      }),
+    };
+  });
 }
 
 // Normalize one get-intel-timeline record. Attribution is mandatory: an

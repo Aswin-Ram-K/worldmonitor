@@ -9,7 +9,7 @@
 import { publisherFamilyFor, publisherFamilyForDomain } from '../shared/publisher-families.js';
 import { AGGREGATOR_LINK_HOSTS, isVerifiableArticleUrl } from '../shared/article-url.js';
 export { AGGREGATOR_LINK_HOSTS, isVerifiableArticleUrl };
-import { validateNoHallucinatedProperNouns } from '../shared/brief-llm-core.js';
+import { validateNoHallucinatedFacts, validateNoHallucinatedProperNouns } from '../shared/brief-llm-core.js';
 import { resolveIso2 } from './_country-resolver.mjs';
 const BRIEF_SECTION_HEADERS = ['SITUATION NOW', 'KEY RISKS', 'OUTLOOK', 'WATCH ITEMS'];
 
@@ -138,6 +138,10 @@ export function hasBriefGrounding(rows) {
 }
 
 const COUNTRY_HEADING_RE = /^(WHAT THIS MEANS FOR)\s+(.+?)\s*:?$/i;
+// Notices the headline-only brief printed in place of content (retired with
+// the evidence-grounded brief). Snapshots frozen before then still carry
+// them; they read as "we have nothing" and must not reach a page.
+const LEGACY_NOTICE_RE = /^(?:The supplied headlines do not establish this\.|Some generated claims were withheld because they did not match the supplied source titles\.)$/;
 // Markdown the model emits and the corpus injects as text: bold/italic
 // marker pairs and ATX heading hashes. Kept as a list so the next marker is
 // one entry, not a new guard (the first round pinned `**` alone).
@@ -169,13 +173,21 @@ export function normalizeBriefText(text, { countryCode = '', countryName = '' } 
   const preambleIsTheatre = firstHeader > 0
     && !lines.slice(0, firstHeader).some((line) => /\[\d+\]/.test(line));
   const body = preambleIsTheatre ? lines.slice(firstHeader) : lines;
-  const repaired = body.map((line) => {
-    const match = line.trim().match(COUNTRY_HEADING_RE);
-    if (!match || !code || !name) return line;
-    if (match[2].toUpperCase() !== code && resolveIso2({ name: match[2] }) !== code) return line;
-    return `${match[1].toUpperCase()} ${name.toUpperCase()}`;
+  const repaired = body
+    .filter((line) => !LEGACY_NOTICE_RE.test(line.trim()))
+    .map((line) => {
+      const match = line.trim().match(COUNTRY_HEADING_RE);
+      if (!match || !code || !name) return line;
+      if (match[2].toUpperCase() !== code && resolveIso2({ name: match[2] }) !== code) return line;
+      return `${match[1].toUpperCase()} ${name.toUpperCase()}`;
+    });
+  // A heading the notices left without content goes too, with its blank line.
+  const kept = repaired.filter((line, index) => {
+    if (!isBriefSectionHeader(line, { countryCode: code, countryName: name })) return true;
+    const next = repaired.slice(index + 1).find((candidate) => candidate.trim());
+    return next !== undefined && !isBriefSectionHeader(next, { countryCode: code, countryName: name });
   });
-  return repaired.join('\n').trim();
+  return kept.join('\n').replace(/\n{3,}/g, '\n\n').trim();
 }
 
 // The snapshot retains source titles, not article bodies. Never use a URL,
@@ -183,7 +195,10 @@ export function normalizeBriefText(text, { countryCode = '', countryName = '' } 
 // Check whole paragraphs/bullets against EACH cited source: this deliberately
 // withholds mixed-source paragraphs when per-sentence attribution is ambiguous.
 // Uncited lines must still ground their names in the retained source set.
-export function briefCitationGroundingGap(brief, country = {}) {
+// A line citing World Monitor evidence ([E1]) is one claim over everything it
+// cites: its names must appear in the cited titles or fact texts, and its
+// numbers in the cited fact texts, mirroring the server's claim validator.
+export function briefCitationGroundingGap(brief, country = {}, { requireHeadlineCitation = true } = {}) {
   if (typeof brief?.text !== 'string' || !brief.text.trim()) return 'missing text';
   if (!Array.isArray(brief.sources) || !brief.sources.length
     || brief.sources.some((source) => typeof source?.title !== 'string' || !source.title.trim())) {
@@ -191,6 +206,9 @@ export function briefCitationGroundingGap(brief, country = {}) {
   }
   const comparable = (text) => text.normalize('NFKD').replace(/\p{M}/gu, '');
   const titles = brief.sources.map((source) => comparable(stripMarkdownMarkers(source.title)));
+  const factTexts = new Map((Array.isArray(brief.evidence) ? brief.evidence : [])
+    .filter((item) => typeof item?.id === 'string' && typeof item?.factText === 'string')
+    .map((item) => [item.id, comparable(item.factText)]));
   let citationCount = 0;
   for (const rawLine of normalizeBriefText(brief.text, country).split('\n')) {
     const line = rawLine.trim();
@@ -198,11 +216,22 @@ export function briefCitationGroundingGap(brief, country = {}) {
     const indexes = [...line.matchAll(/\[(\d+)\]/g)].map((match) => Number(match[1]));
     citationCount += indexes.length;
     if (indexes.some((index) => index < 1 || index > titles.length)) return 'out-of-range citation';
-    const claim = comparable(line.replace(/\[\d+\]/g, '')
+    const evidenceIds = [...line.matchAll(/\[(E\d{1,2})\]/g)].map((match) => match[1]);
+    if (evidenceIds.some((id) => !factTexts.has(id))) return 'unknown evidence citation';
+    if (!requireHeadlineCitation) citationCount += evidenceIds.length;
+    const claim = comparable(line.replace(/\[\d+\]/g, '').replace(/\[E\d{1,2}\]/g, '')
       .replace(/^(?:[•-]\s*|\*\s+)/, '')
       .replace(/^NEXT \d+H:\s*/i, '')
       .replace(/^WHAT THIS MEANS FOR\s+/i, '').trim());
     if (!claim) return 'empty cited claim';
+    if (evidenceIds.length > 0) {
+      const cited = evidenceIds.map((id) => factTexts.get(id));
+      const names = validateNoHallucinatedProperNouns(claim, [...indexes.map((index) => titles[index - 1]), ...cited].join(' . '), { failClosed: true });
+      if (!names.ok) return `evidence does not ground ${JSON.stringify(names.hallucinated || [])}`;
+      const numbers = validateNoHallucinatedFacts(claim, cited.join(' . '));
+      if (!numbers.ok) return `evidence does not ground ${JSON.stringify(numbers.hallucinated || [])}`;
+      continue;
+    }
     const evidence = indexes.length ? indexes.map((index) => titles[index - 1]) : [titles.join('\n')];
     for (const [position, title] of evidence.entries()) {
       const result = validateNoHallucinatedProperNouns(claim, title, { failClosed: true });
@@ -272,10 +301,13 @@ export function normalizeFrozenDevelopments(developments, { countryCode = '', co
   if (briefCitationGroundingGap(brief, { countryCode, countryName })) {
     return { ...cleaned, brief: null, briefSkipped: 'unsupported-citation' };
   }
+  // Snapshots frozen before the evidence-grounded brief carry the generating
+  // model id; no page or dataset download publishes it.
+  const { model: _model, ...published } = brief;
   return {
     ...cleaned,
     brief: {
-      ...brief,
+      ...published,
       text: normalizeBriefText(brief.text, { countryCode, countryName }),
       sources: Array.isArray(brief.sources)
         ? brief.sources.map((row) => stripRowMarkers(row, ['title']))
