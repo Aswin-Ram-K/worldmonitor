@@ -1,9 +1,8 @@
 #!/usr/bin/env node
 // Bank of England gilt nominal spot curves (Anderson–Sleath), daily since
 // 1979. The daily zip refreshes the current month; the archive zip holds the
-// full history as one workbook per era. Full history is only fetched when the
-// canonical key is empty (cold start); afterwards the daily zip's current
-// month is read-merge-written into the accumulated history.
+// full history as one workbook per era. Refresh the archive on cold start and
+// month rollover so missed month-end observations can be recovered.
 //
 // BoE publishes no API; both zips are public downloads. exceljs and jszip are
 // already seed-runtime dependencies.
@@ -48,19 +47,18 @@ export async function fetchBoeCurve() {
   const previous = await readCanonicalValue(canonicalKey('GB')).catch(() => null);
   const hasHistory = Array.isArray(previous?.curves) && previous.curves.length > 1000;
 
-  let fetched;
-  if (hasHistory) {
-    // Warm path: the current-month zip (~370 KB) only.
-    fetched = await parseZipCurves(await fetchZip(LATEST_ZIP, 60_000));
-  } else {
-    // Cold start: the 39 MB archive (~9 s parse, ~1 GB peak RSS with
-    // workbook-by-workbook load) plus the current month.
-    const [archive, latest] = await Promise.all([
-      fetchZip(ARCHIVE_ZIP, 240_000).then(parseZipCurves),
-      fetchZip(LATEST_ZIP, 60_000).then(parseZipCurves),
-    ]);
-    fetched = [...archive, ...latest];
-  }
+  const latest = await parseZipCurves(await fetchZip(LATEST_ZIP, 60_000));
+  if (latest.length === 0) throw new Error('BoE latest zip contains no observations');
+  const previousMonth = previous?.curves?.at(-1)?.date?.slice(0, 7);
+  const latestMonth = latest.at(-1).date.slice(0, 7);
+  // An archive failure must fail this run, preserving the old month so the
+  // next attempt still backfills it before advancing the canonical history.
+  const refreshArchive = !hasHistory || previousMonth !== latestMonth;
+  const archive = refreshArchive
+    ? await parseZipCurves(await fetchZip(ARCHIVE_ZIP, 240_000))
+    : [];
+  if (refreshArchive && archive.length === 0) throw new Error('BoE archive contains no observations');
+  const fetched = [...archive, ...latest];
 
   const merged = mergeCurveHistory(previous, fetched);
   console.log(`  BoE: fetched ${fetched.length} days, merged history ${merged.curves.length} days, ${merged.curves[0]?.date} → ${merged.curves.at(-1)?.date}`);

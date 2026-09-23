@@ -24,6 +24,8 @@ import { parseJgbCsv } from '../scripts/lib/yield-curves/jgb.mjs';
 import { parseBocBenchmarkCsv, parseBocTbillCsv, mergeBocCurves } from '../scripts/lib/yield-curves/boc.mjs';
 import { parseBundesbankCsv } from '../scripts/lib/yield-curves/bundesbank.mjs';
 import { parseBoeNominalWorkbook } from '../scripts/lib/yield-curves/boe.mjs';
+import { fetchBoeCurve } from '../scripts/seed-yield-curve-gb.mjs';
+import { latestTransform } from '../scripts/seed-oecd-lt-rates.mjs';
 import { parseRbaWorkbook } from '../scripts/lib/yield-curves/rba.mjs';
 import { parseSnbRendeiduebdCsv } from '../scripts/lib/yield-curves/snb.mjs';
 import { parseNorgesZeroCouponCsv } from '../scripts/lib/yield-curves/norges.mjs';
@@ -271,6 +273,25 @@ describe('per-source parsers (captured fixtures)', () => {
 });
 
 describe('seeder wiring', () => {
+  it('requires country in the generated query contract', () => {
+    const spec = JSON.parse(readFileSync(new URL('../docs/api/EconomicService.openapi.json', import.meta.url), 'utf8'));
+    const operation = spec.paths['/api/economic/v1/get-government-yield-curve'].get;
+    assert.equal(operation.parameters.find((param: { name: string }) => param.name === 'country').required, true);
+  });
+
+  it('counts each country in the OECD latest payload', () => {
+    const history = buildOecdLtPayload(Object.fromEntries(
+      Object.keys(OECD_LT_MARKETS).map((country) => [country, [
+        { date: '2026-06-01', value: 3.5 },
+        { date: '2026-07-01', value: 3.6 },
+      ]]),
+    ));
+    const latest = latestTransform(history);
+    assert.equal(declareOecdRecords(latest), Object.keys(OECD_LT_MARKETS).length);
+    assert.deepEqual(latest.countries.IT.curves, [{ date: '2026-07-01', tenors: { '10y': 3.6 } }]);
+    assert.equal(declareOecdRecords(latestTransform({ countries: {} })), 0);
+  });
+
   it('derives one key family per market', () => {
     assert.equal(seederCanonicalKey('JP'), 'economic:yield-curve:jp:v1');
     assert.equal(seederLatestKey('JP'), 'economic:yield-curve:jp:v1:latest');
@@ -311,6 +332,65 @@ describe('seeder wiring', () => {
       { date: '2015-01-05', tenors: { '1y': 1 } },
       { date: '2026-09-01', tenors: { '1y': 1 } },
     ] }), true);
+  });
+});
+
+describe('BoE month rollover recovery', () => {
+  async function zipFor(date: string) {
+    const { default: JSZip } = await import('jszip');
+    const { default: ExcelJS } = await import('exceljs');
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet('4. spot curve');
+    sheet.getCell('B4').value = 1;
+    sheet.getCell('A5').value = new Date(`${date}T00:00:00Z`);
+    sheet.getCell('B5').value = 4.2;
+    const zip = new JSZip();
+    zip.file('GLC Nominal daily data.xlsx', await workbook.xlsx.writeBuffer());
+    return zip.generateAsync({ type: 'nodebuffer' });
+  }
+
+  async function mockSource(lastDate: string, archiveFails = false) {
+    redisEnv();
+    const previous = { curves: [
+      ...Array.from({ length: 1001 }, (_, day) => ({
+        date: new Date(Date.UTC(2020, 0, day + 1)).toISOString().slice(0, 10),
+        tenors: { '1y': 4 },
+      })),
+      { date: lastDate, tenors: { '1y': 4.1 } },
+    ] };
+    const latest = await zipFor('2026-10-01');
+    const archive = await zipFor('2026-09-30');
+    const urls: string[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      urls.push(url);
+      if (url.startsWith('https://redis.example.test/')) return redisResult(previous);
+      if (url.endsWith('latest-yield-curve-data.zip')) return new Response(new Uint8Array(latest));
+      if (url.endsWith('glcnominalddata.zip')) {
+        return archiveFails ? new Response('', { status: 503 }) : new Response(new Uint8Array(archive));
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    }) as typeof fetch;
+    return urls;
+  }
+
+  it('backfills a missed final day before publishing the new month', async () => {
+    const urls = await mockSource('2026-09-29');
+    const result = await fetchBoeCurve();
+    assert.deepEqual(result.curves.slice(-3).map((curve) => curve.date), ['2026-09-29', '2026-09-30', '2026-10-01']);
+    assert.ok(urls.some((url) => url.endsWith('glcnominalddata.zip')));
+  });
+
+  it('keeps same-month runs on the small daily download', async () => {
+    const urls = await mockSource('2026-10-01');
+    const result = await fetchBoeCurve();
+    assert.equal(result.curves.at(-1)?.tenors['1y'], 4.2);
+    assert.ok(!urls.some((url) => url.endsWith('glcnominalddata.zip')));
+  });
+
+  it('fails rollover publication when the archive cannot be read', async () => {
+    await mockSource('2026-09-29', true);
+    await assert.rejects(fetchBoeCurve(), /BoE HTTP 503/);
   });
 });
 

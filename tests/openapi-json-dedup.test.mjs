@@ -493,14 +493,14 @@ describe('ensureInlineTypedInput (fixture)', () => {
       paths: {
         '/only-ref': {
           get: {
-            parameters: [{ $ref: '#/components/parameters/JmespathParam' }],
+            parameters: [{ $ref: '#/components/parameters/Jmespath' }],
           },
         },
         '/has-path': {
           get: {
             parameters: [
               { name: 'id', in: 'path', schema: { type: 'string' } },
-              { $ref: '#/components/parameters/JmespathParam' },
+              { $ref: '#/components/parameters/Jmespath' },
             ],
           },
         },
@@ -515,7 +515,7 @@ describe('ensureInlineTypedInput (fixture)', () => {
       },
       components: {
         parameters: {
-          JmespathParam: { name: 'jmespath', in: 'query', schema: { type: 'string' } },
+          Jmespath: { name: 'jmespath', in: 'query', schema: { type: 'string' } },
           IdempotencyKeyParam: { name: 'Idempotency-Key', in: 'header', schema: { type: 'string' } },
         },
         schemas: { Body: { type: 'object', properties: { ok: { type: 'boolean' } } } },
@@ -525,11 +525,11 @@ describe('ensureInlineTypedInput (fixture)', () => {
     const stats = ensureInlineTypedInput(spec);
     assert.equal(stats.inlined, 1);
     assert.equal(spec.paths['/only-ref'].get.parameters[0].name, 'jmespath');
-    assert.equal(spec.paths['/has-path'].get.parameters[1].$ref, '#/components/parameters/JmespathParam');
+    assert.equal(spec.paths['/has-path'].get.parameters[1].$ref, '#/components/parameters/Jmespath');
     assert.equal(spec.paths['/has-body'].post.parameters[0].$ref, '#/components/parameters/IdempotencyKeyParam');
   });
 
-  it('inlines the smallest typed $ref, not JmespathParam, when both are present', () => {
+  it('inlines the smallest typed $ref, not Jmespath, when both are present', () => {
     const spec = {
       openapi: '3.1.0',
       paths: {
@@ -537,7 +537,7 @@ describe('ensureInlineTypedInput (fixture)', () => {
           get: {
             parameters: [
               { $ref: '#/components/parameters/CursorParam' },
-              { $ref: '#/components/parameters/JmespathParam' },
+              { $ref: '#/components/parameters/Jmespath' },
             ],
           },
         },
@@ -545,7 +545,7 @@ describe('ensureInlineTypedInput (fixture)', () => {
       components: {
         parameters: {
           CursorParam: { name: 'cursor', in: 'query', schema: { type: 'string' } },
-          JmespathParam: {
+          Jmespath: {
             name: 'jmespath',
             in: 'query',
             description: 'x'.repeat(200),
@@ -558,7 +558,7 @@ describe('ensureInlineTypedInput (fixture)', () => {
     const stats = ensureInlineTypedInput(spec);
     assert.equal(stats.inlined, 1);
     assert.equal(spec.paths['/both'].get.parameters[0].name, 'cursor');
-    assert.equal(spec.paths['/both'].get.parameters[1].$ref, '#/components/parameters/JmespathParam');
+    assert.equal(spec.paths['/both'].get.parameters[1].$ref, '#/components/parameters/Jmespath');
   });
 
   it('shortens a long description on the restored copy and leaves the component whole', () => {
@@ -569,10 +569,10 @@ describe('ensureInlineTypedInput (fixture)', () => {
       + 'because only a description over the inline cap is shortened at all.';
     const spec = {
       openapi: '3.1.0',
-      paths: { '/only-ref': { get: { parameters: [{ $ref: '#/components/parameters/JmespathParam' }] } } },
+      paths: { '/only-ref': { get: { parameters: [{ $ref: '#/components/parameters/Jmespath' }] } } },
       components: {
         parameters: {
-          JmespathParam: { name: 'jmespath', in: 'query', description: full, schema: { type: 'string' } },
+          Jmespath: { name: 'jmespath', in: 'query', description: full, schema: { type: 'string' } },
         },
       },
     };
@@ -582,7 +582,7 @@ describe('ensureInlineTypedInput (fixture)', () => {
     // The copy exists so a JSON-only scanner sees a typed, described input —
     // not so the component's full caveats are repeated on every operation.
     assert.equal(restored.schema.type, 'string');
-    // JmespathParam carries a curated summary: the lead sentence plus the two
+    // Jmespath carries a curated summary: the lead sentence plus the two
     // limits the API contract states on every operation.
     assert.equal(
       restored.description,
@@ -592,7 +592,7 @@ describe('ensureInlineTypedInput (fixture)', () => {
       Buffer.byteLength(restored.description, 'utf8') <= INLINE_DESCRIPTION_MAX_BYTES,
       `restored description is ${Buffer.byteLength(restored.description, 'utf8')} bytes`,
     );
-    assert.equal(spec.components.parameters.JmespathParam.description, full);
+    assert.equal(spec.components.parameters.Jmespath.description, full);
   });
 
   it('derives a balanced lead sentence when the lead carries an abbreviation inside a parenthetical', () => {
@@ -739,8 +739,8 @@ describe('public OpenAPI dedupe (real bundle)', () => {
 
   it('actually engages on the fleet-wide injected parameters (jmespath et al.)', () => {
     assert.ok(
-      deduped.components.parameters.JmespathParam,
-      'the injector-stamped jmespath param must dedupe into components.parameters.JmespathParam',
+      deduped.components.parameters.Jmespath,
+      'the injector-stamped jmespath param must dedupe into components.parameters.Jmespath',
     );
     assert.ok(paramStats.replacedRefs >= 200, `expected fleet-wide dedup, got ${paramStats.replacedRefs} refs`);
   });
@@ -777,12 +777,12 @@ describe('public OpenAPI dedupe (real bundle)', () => {
   });
 
   it('keeps the restored copies short while the component keeps the authoritative text', () => {
-    // Carrying JmespathParam's whole 403-byte description on all 62 restored
+    // Carrying Jmespath's whole 403-byte description on all 62 restored
     // operations spent ~25 KB of a 950,000-byte budget to say the same thing 62
     // times. The lead sentence plus a pointer keeps a JSON-only scanner's prose
     // and the component keeps the caveats, the limits and the doc link.
     const { spec } = buildBundle({ spec: loadUnifiedOpenApiSpec() });
-    const component = spec.components.parameters.JmespathParam;
+    const component = spec.components.parameters.Jmespath;
     assert.match(component.description, /1024 UTF-8 bytes/, 'the component must keep the full description');
     assert.match(component.description, /docs\/mcp-jmespath/, 'the component must keep the documentation link');
 

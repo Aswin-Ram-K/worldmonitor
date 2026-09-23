@@ -3,6 +3,7 @@ syntax = "proto3";
 package worldmonitor.economic.v1;
 
 import "sebuf/http/annotations.proto";
+import "buf/validate/validate.proto";
 
 // One business day's curve for one sovereign. Tenor keys are lowercase
 // maturity labels ("3m"…"40y"); an absent tenor was not published that day.
@@ -16,7 +17,11 @@ message YieldCurvePoint {
 // GetGovernmentYieldCurveRequest selects one sovereign market and window.
 message GetGovernmentYieldCurveRequest {
   // ISO 3166-1 alpha-2 code of the sovereign, e.g. "JP" or "DE".
-  string country = 1 [(sebuf.http.query) = {name: "country"}];
+  string country = 1 [
+    (buf.validate.field).required = true,
+    (buf.validate.field).string.min_len = 1,
+    (sebuf.http.query) = {name: "country"}
+  ];
   // True for every stored business day; false for the latest day.
   bool history = 2 [(sebuf.http.query) = {name: "history"}];
 }

@@ -10883,7 +10883,7 @@ paths:
                 - name: country
                   in: query
                   description: ISO 3166-1 alpha-2 code of the sovereign, e.g. "JP" or "DE".
-                  required: false
+                  required: true
                   example: "US"
                   schema:
                     type: string
@@ -42856,10 +42856,13 @@ components:
             properties:
                 country:
                     type: string
+                    minLength: 1
                     description: ISO 3166-1 alpha-2 code of the sovereign, e.g. "JP" or "DE".
                 history:
                     type: boolean
                     description: True for every stored business day; false for the latest day.
+            required:
+                - country
             description: GetGovernmentYieldCurveRequest selects one sovereign market and window.
         worldmonitor_economic_v1_GetGovernmentYieldCurveResponse:
             type: object

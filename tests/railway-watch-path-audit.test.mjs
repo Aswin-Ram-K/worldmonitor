@@ -960,7 +960,7 @@ describe('planned Railway service lifecycle', () => {
     cronSchedule: '7,22,37,52 * * * *',
   };
 
-  it('keeps unprovisioned standalone seeders explicitly planned', () => {
+  it('keeps unprovisioned seeders explicitly planned', () => {
     // An exact list, not a predicate: `planned` removes an entry from the live
     // audit AND from `--apply`, so every addition has to be a decision somebody
     // made rather than a way to quiet a red gate.
@@ -979,6 +979,8 @@ describe('planned Railway service lifecycle', () => {
       // carries Arms-Suppliers, Military-Bases and Mineral-Production, so
       // leaving it planned would exempt three low-cadence members behind a
       // single daily cron from the watch-path and deploy-drift checks.
+      // #8522 still requires provisioning; do not invent a live service ID.
+      'seed-bundle-yield-curves',
       'seed-crypto-sectors',
       'seed-market-quotes',
       'seed-service-statuses',
@@ -991,11 +993,11 @@ describe('planned Railway service lifecycle', () => {
     assert.deepEqual(
       plannedEntries.map((entry) => entry.service).sort(),
       expectedPlannedServices,
-      'only unprovisioned standalone seeders may be marked planned',
+      'only unprovisioned seeders may be marked planned',
     );
     assert.ok(
       plannedEntries.every((entry) => entry.lifecycle === 'planned'),
-      'unprovisioned standalone seeders must not be treated as active Railway services',
+      'unprovisioned seeders must not be treated as active Railway services',
     );
     assert.deepEqual(
       managedRailwayServices(RAILWAY_SERVICE_REGISTRY).filter((entry) =>

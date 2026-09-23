@@ -62,7 +62,7 @@ function contentMeta(data) {
   return tokensToContentMeta(dates.slice(0, 2).concat(dates.at(-1)));
 }
 
-function latestTransform(data) {
+export function latestTransform(data) {
   const latest = {};
   for (const [market, entry] of Object.entries(data?.countries ?? {})) {
     const last = entry?.curves?.at(-1);
@@ -95,7 +95,7 @@ if (process.argv[1]?.endsWith('seed-oecd-lt-rates.mjs')) {
     contentMeta,
     maxContentAgeMin: MAX_CONTENT_AGE_MIN,
     extraKeys: [
-      { key: OECD_LT_LATEST_KEY, transform: latestTransform, declareRecords: () => Object.keys.length },
+      { key: OECD_LT_LATEST_KEY, transform: latestTransform, declareRecords: declareOecdRecords },
     ],
     afterPublish: markActivated,
   }).catch((err) => {
