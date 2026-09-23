@@ -96,15 +96,13 @@ export function parseEurostatHicp(data, geoToIso2) {
 /**
  * Build the Eurostat geo -> ISO-2 lookup. Eurostat quirks: Greece is `EL`, the
  * euro area is `EA20`, and the EU aggregate is `EU27_2020` (see EU_GEOS).
- * The two aggregates are not countries and are available to consumers only if
- * callers choose to surface them, so map them here under their own codes.
+ * The two aggregates are not countries and are excluded from country rows.
  */
 export function eurostatGeoMap() {
   const map = new Map();
   for (const geo of EU_GEOS) {
     if (geo === 'EL') { map.set(geo, 'GR'); continue; }
-    if (geo === 'EA20') { map.set(geo, 'EA'); continue; }
-    if (geo === 'EU27_2020') { map.set(geo, 'EU'); continue; }
+    if (geo === 'EA20' || geo === 'EU27_2020') continue;
     map.set(geo, geo);
   }
   return map;

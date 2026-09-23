@@ -202,15 +202,6 @@ export function buildHarmonised(byCountry, indexBases) {
 }
 
 /**
- * Combine `countries` and `harmonised` maps into one canonical payload.
- */
-export function buildCpiPayload({ national, harmonised, indexBases } = {}) {
-  const payload = buildNational(national, indexBases);
-  if (harmonised) payload.harmonised = buildSeriesMap(harmonised, indexBases);
-  return payload;
-}
-
-/**
  * Series maps a canonical CPI payload may carry. `countries` is the national
  * CPI series; `harmonised` is the HICP series some sources report alongside it.
  */

@@ -37,7 +37,8 @@ import {
   CPI_MONTHLY_WINDOW,
   CPI_QUARTERLY_WINDOW,
   MONTHLY_CHANGE_LAG,
-  buildCpiPayload,
+  buildNational,
+  buildHarmonised,
   cpiContentMeta,
   countCpiPoints,
   latestCpiWindow,
@@ -92,7 +93,7 @@ async function fetchFrequency(iso3Codes, frequency, observations) {
 export function splitImfCpiRows(rows, iso3ToIso2) {
   const national = {};
   const harmonised = {};
-  const indexBases = {};
+  const indexBases = { CPI: { M: {}, Q: {} }, HICP: { M: {}, Q: {} } };
   for (const row of Array.isArray(rows) ? rows : []) {
     const iso2 = iso3ToIso2.get(row?.COUNTRY);
     const value = Number(row?.OBS_VALUE);
@@ -103,7 +104,7 @@ export function splitImfCpiRows(rows, iso3ToIso2) {
     const target = indexType === 'HICP' ? harmonised : indexType === 'CPI' ? national : null;
     if (!target) continue;
     const base = String(row?.COMMON_REFERENCE_PERIOD ?? '').trim();
-    if (/^\d{4}A$/.test(base)) indexBases[iso2] = `${base.slice(0, 4)}=100`;
+    if (/^\d{4}A$/.test(base)) indexBases[indexType][frequency][iso2] = `${base.slice(0, 4)}=100`;
     (target[iso2] ??= []).push({ date: String(row?.TIME_PERIOD ?? ''), value });
   }
   return { national, harmonised, indexBases };
@@ -117,6 +118,22 @@ function mergePoints(left, right) {
   return merged;
 }
 
+/** Keep each base label with the index type and frequency selected for its points. */
+export function buildImfCpiPayload(monthly, quarterly) {
+  const data = {
+    ...buildNational(mergePoints(monthly.national, quarterly.national)),
+    ...buildHarmonised(mergePoints(monthly.harmonised, quarterly.harmonised)),
+  };
+  for (const [field, indexType] of [['countries', 'CPI'], ['harmonised', 'HICP']]) {
+    for (const [iso2, series] of Object.entries(data[field])) {
+      const source = series.frequency === 'Q' ? quarterly : monthly;
+      const base = source.indexBases[indexType][series.frequency][iso2];
+      if (base) series.indexBase = base;
+    }
+  }
+  return data;
+}
+
 async function fetchWorldCpiImf() {
   const iso3ToIso2 = new Map(Object.entries(loadSharedConfig('iso3-to-iso2.json')));
   const iso3Codes = [...iso3ToIso2.keys()].sort();
@@ -127,11 +144,7 @@ async function fetchWorldCpiImf() {
   const monthly = splitImfCpiRows(parseSdmxCsv(monthlyText), iso3ToIso2);
   const quarterly = splitImfCpiRows(parseSdmxCsv(quarterlyText), iso3ToIso2);
 
-  const data = buildCpiPayload({
-    national: mergePoints(monthly.national, quarterly.national),
-    harmonised: mergePoints(monthly.harmonised, quarterly.harmonised),
-    indexBases: { ...quarterly.indexBases, ...monthly.indexBases },
-  });
+  const data = buildImfCpiPayload(monthly, quarterly);
 
   const countries = Object.values(data.countries);
   const monthlyCount = countries.filter((entry) => entry.frequency === 'M').length;

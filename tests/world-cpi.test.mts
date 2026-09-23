@@ -14,12 +14,12 @@ import {
   parseSdmxCsv,
   buildNational,
   buildHarmonised,
-  buildCpiPayload,
   cpiContentMeta,
   countCpiPoints,
 } from '../scripts/_world-cpi-shared.mjs';
 import {
   splitImfCpiRows,
+  buildImfCpiPayload,
   validate as validateImf,
   IMF_CPI_KEY,
   IMF_CPI_LATEST_KEY,
@@ -166,7 +166,20 @@ describe('IMF source', () => {
     const split = splitImfCpiRows([
       { COUNTRY: 'JPN', INDEX_TYPE: 'CPI', FREQUENCY: 'M', TIME_PERIOD: '2026-M06', OBS_VALUE: '113.6', COMMON_REFERENCE_PERIOD: '2020A' },
     ], ISO3_TO_ISO2);
-    assert.equal(split.indexBases.JP, '2020=100');
+    assert.equal(split.indexBases.CPI.M.JP, '2020=100');
+  });
+
+  it('keeps base labels specific to index type and selected frequency', () => {
+    const row = (country, indexType, frequency, base) => ({ COUNTRY: country, INDEX_TYPE: indexType, FREQUENCY: frequency, TIME_PERIOD: frequency === 'M' ? '2026-M06' : '2026-Q2', OBS_VALUE: '110', COMMON_REFERENCE_PERIOD: base });
+    const monthly = splitImfCpiRows([
+      row('DEU', 'CPI', 'M', '2020A'), row('DEU', 'HICP', 'M', '2015A'), row('AUS', 'CPI', 'M', '2020A'),
+    ], ISO3_TO_ISO2);
+    const quarterly = splitImfCpiRows([row('AUS', 'CPI', 'Q', '2025A')], ISO3_TO_ISO2);
+    const data = buildImfCpiPayload(monthly, quarterly);
+    assert.equal(data.countries.DE.indexBase, '2020=100');
+    assert.equal(data.harmonised.DE.indexBase, '2015=100');
+    assert.equal(data.countries.AU.frequency, 'Q');
+    assert.equal(data.countries.AU.indexBase, '2025=100');
   });
 
   it('fails validation below the coverage floor', () => {
@@ -194,6 +207,13 @@ describe('Eurostat source', () => {
     assert.deepEqual(parsed.DE, points([['2025-11', 132.6], ['2025-12', 132.8]]));
     assert.deepEqual(parsed.GR, points([['2025-11', 129.6], ['2025-12', 129.9]]));
     assert.equal(parsed.EL, undefined);
+  });
+
+  it('excludes euro area and EU aggregates from country rows', () => {
+    const map = eurostatGeoMap();
+    assert.equal(map.has('EA20'), false);
+    assert.equal(map.has('EU27_2020'), false);
+    assert.equal(map.get('EL'), 'GR');
   });
 
   it('returns nothing for a payload without dimensions', () => {
