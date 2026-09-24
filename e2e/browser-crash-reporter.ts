@@ -15,20 +15,40 @@ import type { FullResult, Reporter, TestCase, TestResult } from '@playwright/tes
  * unread from #5685 until #8447. This reporter states the count on every run,
  * so a swallowed crash cannot pass as a clean one.
  *
- * Scope note: this is the in-process half. The `variant-smoke-shards` job also
- * greps its teed debug log from the shell (`test.yml`), which covers the same
- * crashes for that job; this reporter is what covers every other Playwright
- * job — variant-smoke-pro-webmcp, prehydration, pro-cls, pro-hero, webmcp and
- * the visual workflows — plus every local invocation that opts in.
+ * Relation to the `variant-smoke-shards` shell step (`test.yml`): the two are
+ * NOT the same count. That step greps its teed log for `signal=SIGTRAP` only;
+ * this reporter counts every browser exit other than `exitCode=0,
+ * signal=null`, so it is a superset (SIGKILL, OOM-style non-zero exits). The
+ * shell step stays the authoritative SIGTRAP count for that job because the
+ * teed log survives a runner killed mid-run, where `onEnd` never runs and this
+ * reporter writes nothing. Each writes its own, differently titled step-summary
+ * section. This reporter is what covers every other Playwright job —
+ * variant-smoke-pro-webmcp, prehydration, pro-cls, pro-hero, webmcp and the
+ * visual workflows — plus every local invocation that opts in.
  */
 
 /**
- * Playwright records each browser process exit at `pw:browser` verbosity as
- * `<process did exit: exitCode=<code>, signal=<name>>`, with `null` for
- * whichever half did not apply. The shape is pinned by the fixture in
- * `tests/ci-workflow-coverage.test.mts`.
+ * Playwright records each process exit at `pw:browser` verbosity as
+ * `[pid=<n>] <process did exit: exitCode=<code>, signal=<name>>`, with `null`
+ * for whichever half did not apply. The shape is pinned by the fixture in
+ * `tests/ci-workflow-coverage.test.mts`. The pid is optional here so a record
+ * that lost its prefix to a chunk boundary still counts.
  */
-const PROCESS_EXIT = /<process did exit: exitCode=(\S+?), signal=(\S+?)>/g;
+const PROCESS_EXIT = /(?:\[pid=(\d+)\] )?<process did exit: exitCode=(\S+?), signal=(\S+?)>/g;
+
+/**
+ * `launchProcess` logs `<launching> <command> <args>` and then, synchronously,
+ * `<launched> pid=<n>`. The video recorder's ffmpeg goes through the same
+ * function and the same `pw:browser` channel (playwright-core
+ * `FfmpegVideoRecorder`), so with `video: 'on-first-retry'` every retried test
+ * adds an ffmpeg launch and exit that are not browser events. Remembering which
+ * pids belong to ffmpeg keeps them out of the count.
+ */
+const LAUNCHING = /<launching> (\S+)/;
+const LAUNCHED = /<launched> pid=(\d+)/;
+const FFMPEG = /ffmpeg/i;
+/** ffmpeg's own exit callback: `ffmpeg onkill exitCode=<code> signal=<name>`. */
+const FFMPEG_ONKILL = 'ffmpeg onkill';
 
 /**
  * Debug output is colorised unless `DEBUG_COLORS=0` is set, and only the
@@ -54,52 +74,95 @@ export interface CrashTally {
   readonly cleanExits: number;
   /** Lines naming -- or fragmenting -- a process exit in a shape this parser did not expect. */
   readonly unparsed: readonly string[];
+  /** Browser processes seen starting (ffmpeg excluded). */
+  readonly browserLaunches: number;
 }
 
 /**
- * Count browser process exits in a `DEBUG=pw:browser` stream.
+ * Stateful accumulator over a `DEBUG=pw:browser` stream.
  *
  * A non-zero exit with no signal is counted as a crash too: the browser died
  * without naming a signal, which is how an OOM kill reads in this log. Only
  * `exitCode=0, signal=null` is an orderly shutdown.
  *
- * Anything exit-related that does not parse is returned in `unparsed` instead
- * of being dropped, including a fragment that lost the phrase to a chunk
+ * Anything exit-related that does not parse is kept in `unparsed` instead of
+ * being dropped, including a fragment that lost the phrase to a chunk
  * boundary -- the filter accepts a bare `exitCode=` assignment as well.
+ *
+ * State spans calls because a launch and its pid, and a pid and its exit, can
+ * arrive in different chunks.
  */
-export function tallyBrowserProcessExits(log: string): CrashTally {
-  const crashes: CrashRecord[] = [];
-  const unparsed: string[] = [];
-  let cleanExits = 0;
+export class BrowserExitTally {
+  private readonly crashes: CrashRecord[] = [];
+  private readonly unparsed: string[] = [];
+  private cleanExits = 0;
+  private browserLaunches = 0;
+  private readonly ffmpegPids = new Set<string>();
+  /**
+   * Whether the last `<launching>` line from each source was ffmpeg. Keyed by
+   * source because `<launching>` and `<launched>` are two writes, and another
+   * worker's output can land between them in the multiplexed stream.
+   */
+  private readonly launchingFfmpeg = new Map<string, boolean>();
 
-  for (const line of log.split('\n')) {
-    // The phrase, or the `exitCode=` assignment behind it: unattributed output
-    // is merged chunk by chunk and never rejoined, so a boundary inside the
-    // phrase leaves neither half holding all of it. Between the two markers
-    // there are only the two characters `: `, so whatever the split point, one
-    // half matches here and the fragment reaches `unparsed` instead of
-    // vanishing. A stray `exitCode=` line that is not an exit record costs one
-    // unparsed entry, which is the conservative direction for a count that
-    // warns when it may under-report.
-    if (!line.includes('process did exit') && !line.includes('exitCode=')) continue;
-    // A line can carry more than one exit, so consume every match and use the
-    // match count -- not a substring test -- to decide whether this is a shape
-    // the parser understands.
-    const matches = [...line.matchAll(PROCESS_EXIT)];
-    if (matches.length === 0) {
-      unparsed.push(stripAnsi(line));
-      continue;
-    }
-    for (const [, exitCode = '', signal = ''] of matches) {
-      if (signal === 'null' && exitCode === '0') {
-        cleanExits += 1;
+  feed(log: string, source = 'run'): void {
+    for (const line of log.split('\n')) {
+      const launching = LAUNCHING.exec(line);
+      if (launching) {
+        this.launchingFfmpeg.set(source, FFMPEG.test(launching[1] ?? ''));
         continue;
       }
-      crashes.push({ signal, exitCode, raw: stripAnsi(line) });
+      const launched = LAUNCHED.exec(line);
+      if (launched) {
+        if (this.launchingFfmpeg.get(source)) this.ffmpegPids.add(launched[1] ?? '');
+        else this.browserLaunches += 1;
+        this.launchingFfmpeg.delete(source);
+        continue;
+      }
+      if (line.includes(FFMPEG_ONKILL)) continue;
+      // The phrase, or the `exitCode=` assignment behind it: unattributed output
+      // is merged chunk by chunk and never rejoined, so a boundary inside the
+      // phrase leaves neither half holding all of it. Between the two markers
+      // there are only the two characters `: `, so whatever the split point, one
+      // half matches here and the fragment reaches `unparsed` instead of
+      // vanishing. A stray `exitCode=` line that is not an exit record costs one
+      // unparsed entry, which is the conservative direction for a count that
+      // warns when it may under-report.
+      if (!line.includes('process did exit') && !line.includes('exitCode=')) continue;
+      // A line can carry more than one exit, so consume every match and use the
+      // match count -- not a substring test -- to decide whether this is a shape
+      // the parser understands.
+      const matches = [...line.matchAll(PROCESS_EXIT)];
+      if (matches.length === 0) {
+        this.unparsed.push(stripAnsi(line));
+        continue;
+      }
+      for (const [, pid, exitCode = '', signal = ''] of matches) {
+        if (pid && this.ffmpegPids.delete(pid)) continue;
+        if (signal === 'null' && exitCode === '0') {
+          this.cleanExits += 1;
+          continue;
+        }
+        this.crashes.push({ signal, exitCode, raw: stripAnsi(line) });
+      }
     }
   }
 
-  return { crashes, cleanExits, unparsed };
+  snapshot(): CrashTally {
+    return {
+      crashes: [...this.crashes],
+      cleanExits: this.cleanExits,
+      unparsed: [...this.unparsed],
+      browserLaunches: this.browserLaunches,
+    };
+  }
+}
+
+/** Count browser process exits in one complete `DEBUG=pw:browser` log. */
+export function tallyBrowserProcessExits(log: string): CrashTally {
+  const tally = new BrowserExitTally();
+  tally.feed(log);
+  return tally.snapshot();
 }
 
 /**
@@ -111,7 +174,7 @@ export function tallyBrowserProcessExits(log: string): CrashTally {
 export function crashSummaryLine(tally: CrashTally): string {
   const { crashes } = tally;
   if (crashes.length === 0) {
-    return '[crash-report] 0 browser crash(es): no chrome-headless-shell process exited on a signal';
+    return '[crash-report] 0 browser crash(es): no recorded browser exit was abnormal';
   }
   const byCause = new Map<string, number>();
   for (const crash of crashes) {
@@ -120,6 +183,34 @@ export function crashSummaryLine(tally: CrashTally): string {
   }
   const breakdown = [...byCause].map(([key, count]) => `${key}x${count}`).join(', ');
   return `[crash-report] ${crashes.length} browser crash(es): ${breakdown}`;
+}
+
+/**
+ * Notices for the ways the headline count can be short: exit lines this
+ * parser could not read, browsers with no recorded exit, and a run where no
+ * browser launch reached the reporter at all. Each would otherwise look
+ * exactly like a crash-free run.
+ */
+export function captureNotices(tally: CrashTally): string[] {
+  const notices: string[] = [];
+  if (tally.unparsed.length > 0) {
+    notices.push(
+      `${tally.unparsed.length} process-exit line(s) in an unrecognised shape; the count above may under-report`,
+    );
+  }
+  const exits = tally.crashes.length + tally.cleanExits;
+  if (tally.browserLaunches === 0 && exits === 0) {
+    notices.push(
+      'no browser launch was recorded: either no test launched a browser, or pw:browser output is not reaching this reporter '
+      + '(DEBUG_FILE and PW_RUNNER_DEBUG both divert it), so a zero here proves nothing',
+    );
+  } else if (tally.browserLaunches > exits) {
+    notices.push(
+      `${tally.browserLaunches - exits} launched browser(s) have no recorded exit; `
+      + 'a process killed with its worker leaves no exit line, so the count above may under-report',
+    );
+  }
+  return notices;
 }
 
 /** Flatten a tally back into the sample lines the step summary quotes. */
@@ -139,6 +230,11 @@ export function crashSampleLines(tally: CrashTally, limit = 50): {
  *
  * Active in CI by default, and locally behind `WM_CRASH_REPORT=1` so a
  * developer iterating does not pay for log capture they did not ask for.
+ *
+ * Every hook is wrapped: Playwright's reporter multiplexer marks any throw as
+ * a reporter error and turns an otherwise passing run into `failed`
+ * (`finishTaskRun` in `runner/index.js`). A reporting bug must never be what
+ * reddens a job.
  */
 export default class BrowserCrashReporter implements Reporter {
   private readonly enabled =
@@ -158,6 +254,11 @@ export default class BrowserCrashReporter implements Reporter {
    */
   constructor() {
     if (!this.enabled) return;
+    for (const diverter of ['DEBUG_FILE', 'PW_RUNNER_DEBUG']) {
+      if (process.env[diverter]) {
+        console.log(`[crash-report] ${diverter} is set: worker debug output bypasses reporters, so no exit can be counted`);
+      }
+    }
     const current = process.env.DEBUG?.trim();
     if (!current) {
       process.env.DEBUG = 'pw:browser';
@@ -168,9 +269,7 @@ export default class BrowserCrashReporter implements Reporter {
     }
   }
 
-  private readonly crashes: CrashRecord[] = [];
-  private unparsed: string[] = [];
-  private cleanExits = 0;
+  private readonly tally = new BrowserExitTally();
 
   /**
    * Debug output arrives as arbitrary chunks, so a process-exit record can be
@@ -193,11 +292,19 @@ export default class BrowserCrashReporter implements Reporter {
   private readonly pending = new Map<string, string>();
 
   onStdOut(chunk: string | Buffer, _test: void | TestCase, result: void | TestResult): void {
-    if (this.enabled) this.absorb(chunk.toString(), result, 'stdout');
+    if (this.enabled) this.guard(() => this.absorb(chunk.toString(), result, 'stdout'));
   }
 
   onStdErr(chunk: string | Buffer, _test: void | TestCase, result: void | TestResult): void {
-    if (this.enabled) this.absorb(chunk.toString(), result, 'stderr');
+    if (this.enabled) this.guard(() => this.absorb(chunk.toString(), result, 'stderr'));
+  }
+
+  private guard(run: () => void): void {
+    try {
+      run();
+    } catch (error) {
+      console.error('[crash-report] reporter error, ignored so it cannot fail the run:', error);
+    }
   }
 
   /**
@@ -221,7 +328,7 @@ export default class BrowserCrashReporter implements Reporter {
    */
   private absorb(chunk: string, result: void | TestResult, stream: 'stdout' | 'stderr'): void {
     if (!result) {
-      this.merge(chunk);
+      this.tally.feed(chunk, 'unattributed');
       return;
     }
 
@@ -237,43 +344,36 @@ export default class BrowserCrashReporter implements Reporter {
     // workers and streams cannot grow the map without bound.
     if (remainder) this.pending.set(key, remainder);
     else this.pending.delete(key);
-    this.merge(combined.slice(0, lastNewline));
-  }
-
-  private merge(text: string): void {
-    const { crashes, cleanExits, unparsed } = tallyBrowserProcessExits(text);
-    this.crashes.push(...crashes);
-    this.cleanExits += cleanExits;
-    this.unparsed.push(...unparsed);
+    this.tally.feed(combined.slice(0, lastNewline), key);
   }
 
   async onEnd(result: FullResult): Promise<void> {
     if (!this.enabled) return;
+    try {
+      await this.report(result);
+    } catch (error) {
+      console.error('[crash-report] reporter error, ignored so it cannot fail the run:', error);
+    }
+  }
+
+  private async report(result: FullResult): Promise<void> {
     // Flush every buffer, not just one: a worker that never emitted a trailing
     // newline still holds a complete record that the tally must see.
-    for (const remainder of this.pending.values()) {
-      if (remainder) this.merge(remainder);
+    for (const [key, remainder] of this.pending) {
+      if (remainder) this.tally.feed(remainder, key);
     }
     this.pending.clear();
 
-    const tally: CrashTally = {
-      crashes: this.crashes,
-      cleanExits: this.cleanExits,
-      unparsed: this.unparsed,
-    };
+    const tally = this.tally.snapshot();
+    const notices = captureNotices(tally);
 
     // Always print, including at zero. A summary that appears only on crashes
     // is indistinguishable from a run whose capture silently broke.
     console.log(crashSummaryLine(tally));
-    console.log(`[crash-report] clean browser exits: ${tally.cleanExits}; run outcome: ${result.status}`);
-    if (tally.unparsed.length > 0) {
-      // A process-exit line this parser could not read is the one way the count
-      // can under-report, so it is named rather than swallowed: an unnoticed
-      // parse miss would look exactly like a crash-free run.
-      console.log(
-        `[crash-report] ${tally.unparsed.length} process-exit line(s) in an unrecognised shape; the count above may under-report`,
-      );
-    }
+    console.log(
+      `[crash-report] browser launches: ${tally.browserLaunches}; clean browser exits: ${tally.cleanExits}; run outcome: ${result.status}`,
+    );
+    for (const notice of notices) console.log(`[crash-report] ${notice}`);
     if (tally.crashes.length > 0 && result.status === 'passed') {
       // The point of #8447: name the swallow rather than let a green tick
       // imply the browser never died.
@@ -283,37 +383,41 @@ export default class BrowserCrashReporter implements Reporter {
       );
     }
 
-    if (process.env.GITHUB_STEP_SUMMARY) await this.writeArtifacts(tally, result);
+    if (process.env.GITHUB_STEP_SUMMARY) await this.writeArtifacts(tally, notices, result);
   }
 
   /**
    * Persist the count where the job already writes artifacts. `test-results/`
    * is uploaded by every Playwright job in `test.yml` and `e2e-visual.yml`, and
    * the step summary is the same channel #8449 uses, so this adds no plumbing.
+   *
+   * The heading names the npm script that ran (`npm_lifecycle_event`), so each
+   * step's section is distinguishable, and says "all abnormal exits" so it is
+   * not mistaken for the ci-smoke step's SIGTRAP-only section.
    */
-  private async writeArtifacts(tally: CrashTally, result: FullResult): Promise<void> {
+  private async writeArtifacts(tally: CrashTally, notices: readonly string[], result: FullResult): Promise<void> {
     const stepSummaryPath = process.env.GITHUB_STEP_SUMMARY;
     if (!stepSummaryPath) return;
 
+    const label = process.env.WM_CRASH_REPORT_LABEL
+      ?? process.env.npm_lifecycle_event
+      ?? process.env.GITHUB_JOB
+      ?? 'e2e run';
     const lines = [
       '',
-      `### Browser crashes, ${process.env.WM_CRASH_REPORT_LABEL ?? 'e2e run'}`,
+      `### Browser crashes (all abnormal exits), ${label}`,
       '',
       crashSummaryLine(tally),
       '',
+      `Browser launches: ${tally.browserLaunches}`,
       `Clean browser exits: ${tally.cleanExits}`,
       `Run outcome: ${result.status}`,
       '',
     ];
+    for (const notice of notices) lines.push(`- ${notice}`);
+    if (notices.length > 0) lines.push('');
     if (tally.unparsed.length > 0) {
-      lines.push(
-        `${tally.unparsed.length} process-exit line(s) in an unrecognised shape; the count above may under-report:`,
-        '',
-        '```',
-        ...tally.unparsed.slice(0, 10),
-        '```',
-        '',
-      );
+      lines.push('Unrecognised process-exit lines:', '', '```', ...tally.unparsed.slice(0, 10), '```', '');
     }
     if (tally.crashes.length > 0) {
       const { lines: samples, omitted } = crashSampleLines(tally);
@@ -327,13 +431,16 @@ export default class BrowserCrashReporter implements Reporter {
     }
 
     const { appendFile, mkdir, writeFile } = await import('node:fs/promises');
-    await appendFile(stepSummaryPath, `${lines.join('\n')}\n`).catch(() => {});
-    await mkdir('test-results', { recursive: true }).catch(() => {});
+    // The headline count is already on the console; a failed write is named
+    // rather than swallowed, so a missing section is never mistaken for zero.
+    const warn = (what: string) => (error: unknown) => {
+      console.error(`[crash-report] could not write ${what}:`, error);
+    };
+    await appendFile(stepSummaryPath, `${lines.join('\n')}\n`).catch(warn('the step summary'));
+    await mkdir('test-results', { recursive: true }).catch(warn('test-results/'));
     await writeFile(
       'test-results/browser-crash-report.json',
-      `${JSON.stringify({ ...tally, runStatus: result.status }, null, 2)}\n`,
-    ).catch(() => {
-      // An unwritable artifact directory must not turn a report into a failure.
-    });
+      `${JSON.stringify({ ...tally, notices, runStatus: result.status }, null, 2)}\n`,
+    ).catch(warn('test-results/browser-crash-report.json'));
   }
 }

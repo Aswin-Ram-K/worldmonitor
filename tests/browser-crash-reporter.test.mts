@@ -1,10 +1,14 @@
 import assert from 'node:assert/strict';
-import { existsSync, statSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, statSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, it } from 'node:test';
 
-import type { FullResult, TestResult } from '@playwright/test';
+import type { FullResult, TestResult } from '@playwright/test/reporter';
 
 import BrowserCrashReporter, {
+  BrowserExitTally,
+  captureNotices,
   crashSampleLines,
   crashSummaryLine,
   tallyBrowserProcessExits,
@@ -90,7 +94,7 @@ describe('browser crash accounting (#8447)', () => {
   it('states zero crashes explicitly rather than printing nothing', () => {
     // A summary that only appears on crashes cannot be told apart from a run
     // whose capture broke, which is the failure mode #8447 is about.
-    const line = crashSummaryLine({ crashes: [], cleanExits: 3, unparsed: [] });
+    const line = crashSummaryLine({ crashes: [], cleanExits: 3, unparsed: [], browserLaunches: 3 });
 
     assert.match(line, /^\[crash-report\] 0 browser crash\(es\)/);
   });
@@ -133,7 +137,7 @@ describe('browser crash reporter class (#8447)', () => {
 
   /**
    * `enabled` is read once at construction and the constructor mutates DEBUG,
-   * so every test snapshots all four variables it can touch and restores them
+   * so every test snapshots every variable it can touch and restores them
    * in `finally` -- otherwise the DEBUG rewrite leaks into every later suite.
    * GITHUB_STEP_SUMMARY is cleared, not just saved: with it set, `onEnd` writes
    * `test-results/` artifacts as a side effect of being tested.
@@ -151,6 +155,9 @@ describe('browser crash reporter class (#8447)', () => {
       WM_CRASH_REPORT: process.env.WM_CRASH_REPORT,
       CI: process.env.CI,
       GITHUB_STEP_SUMMARY: process.env.GITHUB_STEP_SUMMARY,
+      DEBUG_FILE: process.env.DEBUG_FILE,
+      PW_RUNNER_DEBUG: process.env.PW_RUNNER_DEBUG,
+      WM_CRASH_REPORT_LABEL: process.env.WM_CRASH_REPORT_LABEL,
     };
     const restore = (key: keyof typeof saved): void => {
       const value = saved[key];
@@ -160,6 +167,9 @@ describe('browser crash reporter class (#8447)', () => {
 
     process.env.WM_CRASH_REPORT = '1';
     delete process.env.GITHUB_STEP_SUMMARY;
+    delete process.env.DEBUG_FILE;
+    delete process.env.PW_RUNNER_DEBUG;
+    delete process.env.WM_CRASH_REPORT_LABEL;
 
     const existedBefore = existsSync(ARTIFACT);
     const mtimeBefore = existedBefore ? statSync(ARTIFACT).mtimeMs : undefined;
@@ -412,5 +422,239 @@ describe('browser crash reporter class (#8447)', () => {
         restore();
       }
     });
+  });
+
+  /** Capture `console.error` the same way `captureLog` captures `console.log`. */
+  const captureError = (): { errors: string[]; restore: () => void } => {
+    const errors: string[] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => {
+      errors.push(args.map(String).join(' '));
+    };
+    return { errors, restore: () => { console.error = original; } };
+  };
+
+  it('does nothing at all when neither CI nor WM_CRASH_REPORT is set', async () => {
+    await withReporterEnv(async () => {
+      delete process.env.WM_CRASH_REPORT;
+      delete process.env.CI;
+      delete process.env.DEBUG;
+      const { logged, restore } = captureLog();
+      try {
+        const reporter = new BrowserCrashReporter();
+        reporter.onStdErr(`${SIGTRAP}\n`, undefined, worker(0));
+        await reporter.onEnd(passedResult());
+
+        assert.deepEqual(logged, []);
+        assert.equal(process.env.DEBUG, undefined, 'a disabled reporter must not request pw:browser');
+      } finally {
+        restore();
+      }
+    });
+  });
+
+  it('adds pw:browser to DEBUG without dropping or duplicating a channel', async () => {
+    const cases: [string | undefined, string][] = [
+      [undefined, 'pw:browser'],
+      ['pw:api', 'pw:api,pw:browser'],
+      ['pw:api, pw:browser', 'pw:api, pw:browser'],
+    ];
+    for (const [before, after] of cases) {
+      await withReporterEnv(async () => {
+        if (before === undefined) delete process.env.DEBUG;
+        else process.env.DEBUG = before;
+        new BrowserCrashReporter();
+        assert.equal(process.env.DEBUG, after, `DEBUG=${String(before)}`);
+      });
+    }
+  });
+
+  it('warns at construction when worker debug output is diverted away from reporters', async () => {
+    await withReporterEnv(async () => {
+      process.env.DEBUG_FILE = '/tmp/pw-debug.log';
+      const { logged, restore } = captureLog();
+      try {
+        new BrowserCrashReporter();
+        assert.ok(
+          logged.some((line) => line.includes('DEBUG_FILE is set')),
+          `no diversion warning; got:\n${logged.join('\n')}`,
+        );
+      } finally {
+        restore();
+      }
+    });
+  });
+
+  it('contains an error thrown inside a hook so it cannot fail the run', async () => {
+    // Playwright turns any reporter throw into a failed run. A chunk whose
+    // `toString` throws stands in for any bug in the parsing path.
+    await withReporterEnv(async () => {
+      const { restore: restoreLog } = captureLog();
+      const { errors, restore: restoreError } = captureError();
+      try {
+        const reporter = new BrowserCrashReporter();
+        const poisoned = { toString: () => { throw new Error('boom'); } } as unknown as Buffer;
+        assert.doesNotThrow(() => reporter.onStdErr(poisoned, undefined, worker(0)));
+        assert.ok(errors.some((line) => line.includes('boom')), 'the contained error was not reported');
+      } finally {
+        restoreError();
+        restoreLog();
+      }
+    });
+  });
+
+  it('contains an error thrown while reporting at the end of the run', async () => {
+    await withReporterEnv(async () => {
+      const original = console.log;
+      console.log = () => { throw new Error('stdout closed'); };
+      const { errors, restore: restoreError } = captureError();
+      try {
+        const reporter = new BrowserCrashReporter();
+        await assert.doesNotReject(reporter.onEnd(passedResult()));
+        assert.ok(errors.some((line) => line.includes('stdout closed')), 'the contained error was not reported');
+      } finally {
+        restoreError();
+        console.log = original;
+      }
+    });
+  });
+
+  it('ignores the video recorder ffmpeg that a retried test launches', async () => {
+    // `video: 'on-first-retry'` starts ffmpeg through the same launchProcess and
+    // the same pw:browser channel. Its exit is not a browser exit, and its
+    // `ffmpeg onkill exitCode=...` line must not read as an unparsed record.
+    await withReporterEnv(async () => {
+      const { logged, restore } = captureLog();
+      try {
+        const reporter = new BrowserCrashReporter();
+        for (const line of [
+          'pw:browser <launching> /ms-playwright/chromium_headless_shell-1243/chrome-linux/headless_shell --headless',
+          'pw:browser <launched> pid=300',
+          'pw:browser <launching> /ms-playwright/ffmpeg-1011/ffmpeg-linux -loglevel error -f matroska',
+          'pw:browser <launched> pid=301',
+          'pw:browser [pid=301] <process did exit: exitCode=null, signal=SIGKILL>',
+          'pw:browser ffmpeg onkill exitCode=null signal=SIGKILL',
+          'pw:browser [pid=300] <process did exit: exitCode=0, signal=null>',
+        ]) {
+          reporter.onStdErr(`${line}\n`, undefined, worker(0));
+        }
+        await reporter.onEnd(passedResult());
+
+        assert.match(logged.find((line) => line.includes('browser crash(es)')) ?? '', /^\[crash-report\] 0 browser crash\(es\)/);
+        assert.match(
+          logged.find((line) => line.includes('clean browser exits')) ?? '',
+          /browser launches: 1; clean browser exits: 1;/,
+        );
+        assert.equal(
+          logged.some((line) => line.includes('unrecognised shape') || line.includes('no recorded exit')),
+          false,
+          `ffmpeg leaked into the notices:\n${logged.join('\n')}`,
+        );
+      } finally {
+        restore();
+      }
+    });
+  });
+
+  it('writes a labelled step summary and the JSON artifact when GITHUB_STEP_SUMMARY is set', async () => {
+    await withReporterEnv(async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'crash-report-'));
+      const cwd = process.cwd();
+      process.env.GITHUB_STEP_SUMMARY = join(dir, 'summary.md');
+      process.env.WM_CRASH_REPORT_LABEL = 'ci-smoke shard 1';
+      const { restore } = captureLog();
+      process.chdir(dir);
+      try {
+        const reporter = new BrowserCrashReporter();
+        reporter.onStdErr(`pw:browser <launched> pid=101\n${SIGTRAP}\npw:browser [pid=110] <process did exit: code=1>\n`, undefined, worker(0));
+        await reporter.onEnd(passedResult());
+
+        const summary = readFileSync(join(dir, 'summary.md'), 'utf8');
+        assert.match(summary, /### Browser crashes \(all abnormal exits\), ci-smoke shard 1/);
+        assert.match(summary, /1 browser crash\(es\): SIGTRAPx1/);
+        assert.ok(summary.includes(SIGTRAP), 'the crash sample line is missing');
+        assert.ok(summary.includes('<process did exit: code=1>'), 'the unparsed sample line is missing');
+
+        const artifact = JSON.parse(readFileSync(join(dir, 'test-results/browser-crash-report.json'), 'utf8'));
+        assert.equal(artifact.crashes.length, 1);
+        assert.equal(artifact.unparsed.length, 1);
+        assert.equal(artifact.browserLaunches, 1);
+        assert.equal(artifact.runStatus, 'passed');
+      } finally {
+        process.chdir(cwd);
+        restore();
+        delete process.env.GITHUB_STEP_SUMMARY;
+      }
+    });
+  });
+
+  it('names a failed step-summary write instead of swallowing it', async () => {
+    await withReporterEnv(async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'crash-report-'));
+      const cwd = process.cwd();
+      process.env.GITHUB_STEP_SUMMARY = join(dir, 'missing-dir', 'summary.md');
+      const { restore } = captureLog();
+      const { errors, restore: restoreError } = captureError();
+      process.chdir(dir);
+      try {
+        await new BrowserCrashReporter().onEnd(passedResult());
+        assert.ok(
+          errors.some((line) => line.includes('could not write the step summary')),
+          `no write failure reported; got:\n${errors.join('\n')}`,
+        );
+      } finally {
+        process.chdir(cwd);
+        restoreError();
+        restore();
+        delete process.env.GITHUB_STEP_SUMMARY;
+      }
+    });
+  });
+});
+
+describe('browser exit bookkeeping (#8447 review)', () => {
+  it('drops ffmpeg exits even when another worker writes between its launch lines', () => {
+    const tally = new BrowserExitTally();
+    tally.feed('pw:browser <launching> /ms-playwright/ffmpeg-1011/ffmpeg-linux -f matroska', '0:stderr');
+    tally.feed('pw:browser <launching> /ms-playwright/chromium_headless_shell-1243/chrome-linux/headless_shell', '1:stderr');
+    tally.feed('pw:browser <launched> pid=401', '1:stderr');
+    tally.feed('pw:browser <launched> pid=400', '0:stderr');
+    tally.feed('pw:browser [pid=400] <process did exit: exitCode=0, signal=null>', '0:stderr');
+    tally.feed('pw:browser [pid=401] <process did exit: exitCode=null, signal=SIGTRAP>', '1:stderr');
+
+    const snapshot = tally.snapshot();
+    assert.equal(snapshot.browserLaunches, 1);
+    assert.equal(snapshot.cleanExits, 0);
+    assert.deepEqual(snapshot.crashes.map((crash) => crash.signal), ['SIGTRAP']);
+  });
+
+  it('counts every exit record on a line that carries two', () => {
+    const tally = tallyBrowserProcessExits(`${SIGTRAP} ${CLEAN_EXIT}\n`);
+
+    assert.equal(tally.crashes.length, 1);
+    assert.equal(tally.cleanExits, 1);
+    assert.deepEqual(tally.unparsed, []);
+  });
+
+  it('says a zero proves nothing when no browser launch was seen', () => {
+    const notices = captureNotices(tallyBrowserProcessExits('unrelated output\n'));
+
+    assert.equal(notices.length, 1);
+    assert.match(notices[0]!, /no browser launch was recorded/);
+  });
+
+  it('names browsers that launched but never recorded an exit', () => {
+    const notices = captureNotices(
+      tallyBrowserProcessExits(`pw:browser <launched> pid=1\npw:browser <launched> pid=2\n${CLEAN_EXIT}\n`),
+    );
+
+    assert.equal(notices.length, 1);
+    assert.match(notices[0]!, /^1 launched browser\(s\) have no recorded exit/);
+  });
+
+  it('raises no notice when every launched browser has an exit', () => {
+    const notices = captureNotices(tallyBrowserProcessExits(`pw:browser <launched> pid=1\n${SIGTRAP}\n`));
+
+    assert.deepEqual(notices, []);
   });
 });
